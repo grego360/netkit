@@ -124,21 +124,22 @@ netkit doctor       # confirm the 4 GitHub binary matchers still resolve
 
 ## Updating
 
-**Push from the Mac** (this folder), simplest while iterating:
+**Push from the Mac** (this folder), simplest while iterating — use the included
+[`push-netkit.sh`](./push-netkit.sh):
 
 ```bash
-scp netkit terminosa@<pi-ip>:/tmp/netkit
-ssh terminosa@<pi-ip> 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit && netkit version'
+./push-netkit.sh                 # deploy to the default Pi (terminosa@10.1.20.176)
+./push-netkit.sh user@host       # or override the target
+NETKIT_PI=user@host ./push-netkit.sh
 ```
 
-Or drop a `push-netkit.sh` in this folder:
+It lints the script locally first (`bash -n`, plus `shellcheck` if installed), then
+`scp`s it to `/tmp`, `sudo install`s it to `/usr/local/bin/netkit`, and prints the
+shebang + running version. Equivalent one-liner if you'd rather do it by hand:
 
 ```bash
-#!/usr/bin/env bash
-set -euo pipefail
-PI="terminosa@<pi-ip>"
-scp netkit "$PI:/tmp/netkit"
-ssh "$PI" 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit && /usr/local/bin/netkit version'
+scp netkit terminosa@10.1.20.176:/tmp/netkit
+ssh terminosa@10.1.20.176 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit && netkit version'
 ```
 
 **Pull on the Pi** (`netkit update`) is the alternative when you can't easily
