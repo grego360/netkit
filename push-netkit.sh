@@ -26,7 +26,8 @@ echo "▶ Copying to $PI:/tmp/netkit"
 scp "$SRC" "$PI:/tmp/netkit"
 
 echo "▶ Installing to /usr/local/bin/netkit (sudo on the Pi)"
-ssh "$PI" 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit \
+# -t forces a TTY so sudo on the Pi can prompt for its password.
+ssh -t "$PI" 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit \
   && head -1 /usr/local/bin/netkit \
   && /usr/local/bin/netkit version'
 
