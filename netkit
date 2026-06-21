@@ -1,0 +1,1333 @@
+#!/usr/bin/env bash
+# netkit v4 — categorised network toolkit dashboard for a Pi 5 handheld
+# Usage: netkit              (interactive dashboard)
+#        netkit dash         (tiled live view in tmux)
+#        netkit report       (markdown site snapshot)
+#        netkit sweep        (full commissioning sweep → branded report)
+#        netkit setup        (install/refresh extra dependencies)
+#        netkit selftest     (bench check)
+#        netkit doctor       (check prebuilt-binary matchers against GitHub)
+#        netkit site [name]  (site profiles: prefill prompts per location)
+#        netkit autostart on|off   (boot the unit straight into netkit)
+#        netkit update [URL] | uninstall | version | help
+set -uo pipefail
+
+NETKIT_VERSION="4.1.0"
+NETKIT_BIN="/usr/local/bin/netkit"
+NETKIT_BIN_DIR="/usr/local/bin"
+NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
+site_dir="$NETKIT_CFG_DIR/sites"
+
+# ---------- helpers ----------
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ---------- colour ----------
+# Initialised unconditionally (set -u safe); populated only for a real colour
+# terminal. Honours NO_COLOR and a non-tty stdout (e.g. output redirected to a file).
+C_ACCENT="212"   # gum 256-colour code — gum styling only, unaffected by NO_COLOR
+C_HDR=""; C_OK=""; C_WARN=""; C_ERR=""; C_RST=""
+if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
+  C_HDR=$'\033[1;35m'; C_OK=$'\033[1;32m'; C_WARN=$'\033[1;33m'
+  C_ERR=$'\033[1;31m'; C_RST=$'\033[0m'
+fi
+
+# require <cmd> [hint]: 0 if present. If missing, offer to run setup now, then
+# return whether the tool is present — so the action proceeds if setup fixed it,
+# and bails cleanly otherwise.  (do_setup is defined later; resolved at call time.)
+require() {
+  local cmd="$1" hint="${2:-}"
+  have "$cmd" && return 0
+  clear
+  warn "$cmd not installed${hint:+  ($hint)}"
+  if have gum; then
+    gum confirm "Run 'netkit setup' now?" && { do_setup; pause; }
+  else
+    local a; read -rp "Run 'netkit setup' now? (y/N): " a
+    case "$a" in y|Y|yes|YES) do_setup; pause ;; esac
+  fi
+  have "$cmd"
+}
+
+banner() {
+  if have gum; then
+    gum style --border rounded --padding "0 2" \
+      --border-foreground "$C_ACCENT" --foreground "$C_ACCENT" \
+      "netkit" "network toolkit"
+  else
+    echo "== netkit =="
+  fi
+}
+
+# menu [--filter] "Header" "key|Label" ... -> prints the chosen key (empty if
+# cancelled). --filter uses type-to-filter (gum filter) for long menus.
+menu() {
+  local mode="choose"
+  [ "${1:-}" = "--filter" ] && { mode="filter"; shift; }
+  local header="$1"; shift
+  local labels=() keys=() pair
+  for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
+  local chosen=""
+  if have gum; then
+    if [ "$mode" = "filter" ]; then
+      chosen="$(printf '%s\n' "${labels[@]}" | gum filter --placeholder "$header — type to filter · esc cancels" --height 18)"
+    else
+      chosen="$(printf '%s\n' "${labels[@]}" | gum choose --header "$header   (esc cancels)" --height 18)"
+    fi
+  else
+    local PS3="$header > " opt
+    select opt in "${labels[@]}"; do chosen="$opt"; break; done
+  fi
+  [ -z "$chosen" ] && { echo ""; return; }
+  local i
+  for i in "${!labels[@]}"; do
+    [ "${labels[$i]}" = "$chosen" ] && { echo "${keys[$i]}"; return; }
+  done
+  echo ""
+}
+
+ask() { # prompt, default -> prints answer
+  local p="$1" d="${2:-}"
+  if have gum; then gum input --prompt "$p " --value "$d"
+  else local v; read -rp "$p [$d]: " v; echo "${v:-$d}"; fi
+}
+
+# ask_req: like ask but returns non-zero (aborts the action) on empty input
+ask_req() {
+  local v; v="$(ask "$1" "${2:-}")"
+  [ -z "$v" ] && return 1
+  printf '%s' "$v"
+}
+
+# ask_pw: hidden input for secrets (never echoed); non-zero on empty
+ask_pw() {
+  local p="$1" v
+  if have gum; then v="$(gum input --password --prompt "$p ")"
+  else read -rsp "$p " v; echo >&2; fi
+  [ -z "$v" ] && return 1
+  printf '%s' "$v"
+}
+
+# Validating prompts — loop until valid or cancelled (empty). Deliberately loose
+# (field-realistic, not RFC-strict octet ranges — the operator can see the value).
+ask_num() { # prompt default -> integer
+  local p="$1" d="${2:-}" v
+  while :; do
+    v="$(ask "$p" "$d")" || return 1
+    [ -z "$v" ] && return 1
+    case "$v" in ''|*[!0-9]*) warn "Enter digits only." ;; *) printf '%s' "$v"; return 0 ;; esac
+  done
+}
+ask_ip() { # prompt default -> IPv4 dotted quad
+  local p="$1" d="${2:-}" v
+  while :; do
+    v="$(ask "$p" "$d")" || return 1
+    [ -z "$v" ] && return 1
+    case "$v" in
+      *[!0-9.]*) warn "IPv4 only (a.b.c.d)." ;;
+      *.*.*.*)   printf '%s' "$v"; return 0 ;;
+      *)         warn "Not an IPv4 address." ;;
+    esac
+  done
+}
+ask_cidr() { # prompt default -> address/prefix
+  local p="$1" d="${2:-}" v
+  while :; do
+    v="$(ask "$p" "$d")" || return 1
+    [ -z "$v" ] && return 1
+    case "$v" in
+      */[0-9]|*/[0-9][0-9])
+        case "${v%%/*}" in *[!0-9.]*) warn "Bad address." ;; *) printf '%s' "$v"; return 0 ;; esac ;;
+      *) warn "Need address/prefix, e.g. 192.168.1.0/24." ;;
+    esac
+  done
+}
+
+pause() { echo; read -rp "↩ Enter to return to menu… " _; }
+
+run() { clear; echo "\$ $*"; echo "------------------------------------------"; "$@"; pause; }
+runsh() { clear; echo "\$ $1"; echo "------------------------------------------"; bash -c "$1"; pause; }
+
+# spin <title> <cmd...>: show a gum spinner while cmd runs (its output is hidden),
+# returning the command's exit code. Falls back to a plain status line without gum.
+# Prime sudo (sudo -v) before wrapping a sudo command so the spinner can't hide a
+# password prompt.
+spin() {
+  local title="$1"; shift
+  if have gum; then gum spin --spinner dot --title "$title" -- "$@"
+  else echo "… $title"; "$@"; fi
+}
+
+# page <cmd...>: run a BATCH command, capture its output, show inline if it fits
+# the screen else page it. Captures stdout+stderr — NEVER use on an interactive /
+# streaming TUI (capturing would corrupt it). Retains output for save_last_report.
+NETKIT_LAST_OUTPUT=""
+page() {
+  clear; printf '$ %s\n%s\n' "$*" "------------------------------------------"
+  # Prime sudo first so a password prompt shows on the tty rather than being
+  # swallowed by the 2>&1 capture below (which would look like a hang).
+  [ "$1" = sudo ] && sudo -v 2>/dev/null
+  local out rc rows
+  out="$("$@" 2>&1)"; rc=$?
+  NETKIT_LAST_OUTPUT="$out"
+  rows="$(tput lines 2>/dev/null || echo 24)"
+  if [ "$(printf '%s\n' "$out" | wc -l)" -le "$((rows - 4))" ]; then
+    printf '%s\n' "$out"; pause
+  elif have gum; then
+    printf '%s\n' "$out" | gum pager
+  else
+    printf '%s\n' "$out" | less -R
+  fi
+  return "$rc"
+}
+
+say()  { printf '\n%s▶ %s%s\n' "$C_HDR"  "$*" "$C_RST"; }
+ok()   { printf '  %s✓%s %s\n'  "$C_OK"   "$C_RST" "$*"; }
+warn() { printf '  %s!%s %s\n'  "$C_WARN" "$C_RST" "$*"; }
+bad()  { printf '  %s✗%s %s\n'  "$C_ERR"  "$C_RST" "$*"; }
+
+need_iface() {
+  [ -n "$IFACE" ] && return 0
+  clear; echo "No usable network interface detected."; pause; return 1
+}
+
+# ---------- site profiles ----------
+# Safe key=value parser (NOT sourced — config never executes as code).
+NETKIT_SITE=""
+SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
+SITE_SPEED_MIN=""; SITE_DNS_DOMAIN=""; SITE_HTTP_URL=""; SITE_PEER=""; SITE_LOGO=""
+
+load_site() {
+  NETKIT_SITE=""
+  SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
+  SITE_SPEED_MIN=""; SITE_DNS_DOMAIN=""; SITE_HTTP_URL=""; SITE_PEER=""; SITE_LOGO=""
+  local af="$NETKIT_CFG_DIR/active-site"
+  [ -f "$af" ] && NETKIT_SITE="$(cat "$af" 2>/dev/null)"
+  [ -z "$NETKIT_SITE" ] && return 0
+  local cf="$site_dir/$NETKIT_SITE.conf"
+  [ -f "$cf" ] || { NETKIT_SITE=""; return 0; }
+  local line key val
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
+    case "$key" in
+      SMTP) SITE_SMTP="$val" ;;
+      SMTP_PORT) SITE_SMTP_PORT="$val" ;;
+      SNMP_COMMUNITY) SITE_SNMP_COMMUNITY="$val" ;;
+      MQTT) SITE_MQTT="$val" ;;
+      SPEED_MIN) SITE_SPEED_MIN="$val" ;;
+      DNS_DOMAIN) SITE_DNS_DOMAIN="$val" ;;
+      HTTP_URL) SITE_HTTP_URL="$val" ;;
+      PEER) SITE_PEER="$val" ;;
+      LOGO) SITE_LOGO="$val" ;;
+      *) : ;;
+    esac
+  done < "$cf"
+}
+
+site_list() { find "$site_dir" -maxdepth 1 -name '*.conf' -printf '%f\n' 2>/dev/null | sed 's/\.conf$//'; }
+
+site_show() {
+  echo "Active site: ${NETKIT_SITE:-<none>}"
+  [ -n "$NETKIT_SITE" ] && { echo; cat "$site_dir/$NETKIT_SITE.conf" 2>/dev/null; }
+}
+
+site_new() {
+  local name smtp port comm mqtt spd dom url peer logo
+  name="$(ask_req 'Site name (no spaces):' '')" || return
+  name="${name// /-}"
+  smtp="$(ask 'SMTP relay (blank ok):' '')"
+  port="$(ask 'SMTP port:' '587')"
+  comm="$(ask 'SNMP community:' 'public')"
+  mqtt="$(ask 'MQTT broker (blank ok):' '')"
+  spd="$(ask 'Min Mbps for PASS:' '900')"
+  dom="$(ask 'Default DNS domain (blank ok):' '')"
+  url="$(ask 'Default HTTP URL (blank ok):' '')"
+  peer="$(ask 'Peer IP for multicast (blank ok):' '')"
+  logo="$(ask 'Report logo path (blank ok):' '')"
+  mkdir -p "$site_dir"
+  local f="$site_dir/$name.conf"
+  {
+    echo "# netkit site profile: $name"
+    echo "SMTP=$smtp"; echo "SMTP_PORT=$port"; echo "SNMP_COMMUNITY=$comm"
+    echo "MQTT=$mqtt"; echo "SPEED_MIN=$spd"; echo "DNS_DOMAIN=$dom"
+    echo "HTTP_URL=$url"; echo "PEER=$peer"; echo "LOGO=$logo"
+  } > "$f"
+  echo "$name" > "$NETKIT_CFG_DIR/active-site"
+  load_site
+  clear; echo "Created and activated: $name"; echo; cat "$f"; pause
+}
+
+site_select() {
+  local names n pairs=()
+  names="$(site_list)"
+  [ -z "$names" ] && { clear; echo "No sites yet — create one with: netkit site new"; pause; return; }
+  while IFS= read -r n; do [ -n "$n" ] && pairs+=("$n|$n"); done <<< "$names"
+  pairs+=("__none|‹ clear active site")
+  local sel; sel="$(menu "Select site" "${pairs[@]}")"
+  [ -z "$sel" ] && return
+  if [ "$sel" = "__none" ]; then rm -f "$NETKIT_CFG_DIR/active-site"
+  else echo "$sel" > "$NETKIT_CFG_DIR/active-site"; fi
+  load_site
+}
+
+m_site() {
+  local k; k="$(menu "🏷 Site — ${NETKIT_SITE:-none}" \
+    "select|Select active site" \
+    "new|Create new site profile" \
+    "show|Show active site" \
+    "clear|Clear active site" \
+    "back|‹ back")"
+  case "$k" in
+    select) site_select ;;
+    new) site_new ;;
+    show) clear; site_show; pause ;;
+    clear) rm -f "$NETKIT_CFG_DIR/active-site"; load_site; clear; echo "Cleared active site."; pause ;;
+    *) return ;;
+  esac
+}
+
+# CLI: netkit site [new|show|<name>]
+do_site() {
+  case "${1:-}" in
+    new) site_new ;;
+    show|"") load_site; site_show ;;
+    *) if [ -f "$site_dir/$1.conf" ]; then echo "$1" > "$NETKIT_CFG_DIR/active-site"; echo "Active site: $1"
+       else echo "No such site: $1 (create with: netkit site new)"; fi ;;
+  esac
+}
+
+# ---------- per-site dated output folder ----------
+report_dir() {
+  local d
+  d="$HOME/netkit-reports/${NETKIT_SITE:-default}/$(date +%Y%m%d)"
+  mkdir -p "$d"
+  printf '%s' "$d"
+}
+
+# ---------- battery (optional UPS/HAT via sysfs) ----------
+battery_status() {
+  local b
+  for b in /sys/class/power_supply/*; do
+    [ -e "$b/type" ] || continue
+    if [ "$(cat "$b/type" 2>/dev/null)" = "Battery" ] && [ -r "$b/capacity" ]; then
+      local cap; cap="$(cat "$b/capacity" 2>/dev/null)"
+      [ -n "$cap" ] && { printf '%s' "$cap"; return 0; }
+    fi
+  done
+  return 1
+}
+
+# Gateway reachability dot, cached 15s so menu redraws don't pay a ~1s ping each.
+GW_REACH=""; GW_REACH_TS="0"
+gw_dot() {
+  local now; now="$(date +%s)"
+  if [ "$((now - GW_REACH_TS))" -ge 15 ]; then
+    if [ -n "$GW" ] && ping -c1 -W1 "$GW" >/dev/null 2>&1; then GW_REACH="up"; else GW_REACH="down"; fi
+    GW_REACH_TS="$now"
+  fi
+  case "$GW_REACH" in
+    up)   printf '%s●%s' "$C_OK"  "$C_RST" ;;
+    down) printf '%s●%s' "$C_ERR" "$C_RST" ;;
+    *)    printf '○' ;;
+  esac
+}
+
+status_line() {
+  local dot s
+  dot="$(gw_dot)"
+  s=" iface: ${IFACE:-?}  ip: ${SELFIP:-?}  gw: $dot ${GW:-?}  wifi: ${WIFACE:-none}"
+  [ -n "$NETKIT_SITE" ] && s="$s  site: $NETKIT_SITE"
+  local b; if b="$(battery_status)"; then s="$s  bat: ${b}%"; fi
+  printf '%s\n' "$s"
+}
+
+# ---------- live network facts ----------
+IFACE="$(ip -o -4 addr show scope global up 2>/dev/null | awk '{print $2; exit}')"
+[ -z "${IFACE:-}" ] && IFACE="$(ip route show default 2>/dev/null | awk '{print $5; exit}')"
+[ -z "${IFACE:-}" ] && IFACE="$(ip -o link show up 2>/dev/null | awk -F': ' '$2!="lo"{print $2; exit}')"
+
+GW="$(ip route show default 2>/dev/null | awk '{print $3; exit}')"
+CIDR="$(ip -o -f inet addr show "${IFACE:-lo}" 2>/dev/null | awk '{print $4; exit}')"
+SELFIP="${CIDR%%/*}"
+
+WIFACE="$(for d in /sys/class/net/*/wireless; do
+  [ -e "$d" ] && basename "$(dirname "$d")" && break; done)"
+
+WIRED="$(for d in /sys/class/net/*; do
+  n="$(basename "$d")"; [ "$n" = "lo" ] && continue
+  [ -e "$d/wireless" ] && continue
+  [ -e "$d/device" ] && { echo "$n"; break; }
+done)"
+
+# ---------- categories ----------
+m_discovery() {
+  local k; k="$(menu "🔍 Discovery" \
+    "arp|ARP sweep (layer-2, fast)" \
+    "fp|fping sweep (which IPs answer)" \
+    "nsn|Nmap ping sweep (-sn)" \
+    "nsv|Nmap service scan (-sV)" \
+    "dhcp|DHCP servers (rogue check)" \
+    "mdns|mDNS / Bonjour browse (all)" \
+    "av|AV gear (Dante / NDI / AirPlay / Sonos)" \
+    "n6|IPv6 (neighbours / routers)" \
+    "back|‹ back")"
+  case "$k" in
+    arp) need_iface || return; run sudo arp-scan --interface="$IFACE" --localnet ;;
+    fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+         require fping fping || return; runsh "fping -a -g $n 2>/dev/null" ;;
+    nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
+    nsv) local h; h="$(ask_req "Host:" "$GW")" || return; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
+    dhcp) need_iface || return; run sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
+    mdns) run avahi-browse -a -t -r ;;
+    av) run av_browse ;;
+    n6) m_ipv6 ;;
+    *) return ;;
+  esac
+}
+
+av_browse() {
+  if ! have avahi-browse; then echo "avahi-browse missing (apt install avahi-utils)"; return; fi
+  local types=(
+    _netaudio-arc._udp _netaudio-cmc._udp _netaudio-chan._udp
+    _ndi._tcp _airplay._tcp _raop._tcp _googlecast._tcp _sonos._tcp _spotify-connect._tcp
+  )
+  local ty hit=0
+  for ty in "${types[@]}"; do
+    local out
+    out="$(avahi-browse -t -r -p "$ty" 2>/dev/null \
+            | awk -F';' '/^=/{printf "    %-28s %s:%s  (%s)\n", $4, $8, $9, $7}')"
+    if [ -n "$out" ]; then printf '  %s\n%s\n' "$ty" "$out"; hit=1; fi
+  done
+  [ "$hit" -eq 0 ] && echo "  No AV/mDNS services seen on this network."
+}
+
+m_ipv6() {
+  need_iface || return
+  local k; k="$(menu "🌐 IPv6 ($IFACE)" \
+    "nbr|Neighbour sweep (link-local all-nodes)" \
+    "rtr|Router discovery (rdisc6)" \
+    "lookup|Neighbour lookup (ndisc6 <addr>)" \
+    "back|‹ back")"
+  case "$k" in
+    nbr) runsh "ping -6 -c2 ff02::1%$IFACE >/dev/null 2>&1; ip -6 neigh show dev $IFACE" ;;
+    rtr) require rdisc6 ndisc6 || return; run rdisc6 "$IFACE" ;;
+    lookup) require ndisc6 ndisc6 || return
+            local a; a="$(ask_req "IPv6 address:" "")" || return; run ndisc6 "$a" "$IFACE" ;;
+    *) return ;;
+  esac
+}
+
+m_link() {
+  local k; k="$(menu "🔗 Link & Throughput" \
+    "isrv|iperf3 — run as SERVER (listen)" \
+    "icli|iperf3 — run as CLIENT (test to server)" \
+    "icli2|iperf3 client + PASS/FAIL (vs threshold)" \
+    "wan|WAN speed test (to the internet)" \
+    "mtr|mtr (latency + loss to host)" \
+    "ping|ping graph" \
+    "back|‹ back")"
+  case "$k" in
+    isrv) run iperf3 -s ;;
+    icli) local s; s="$(ask_req "Server IP:" "$GW")" || return; run iperf3 -c "$s" ;;
+    icli2) iperf_passfail ;;
+    wan)  require librespeed-cli librespeed-cli || return; run librespeed-cli --no-icmp ;;
+    mtr) local h; h="$(ask_req "Host:" "1.1.1.1")" || return; run mtr "$h" ;;
+    ping) local h; h="$(ask_req "Host:" "$GW")" || return
+          if have gping; then run gping "$h"; else run ping "$h"; fi ;;
+    *) return ;;
+  esac
+}
+
+iperf_passfail() {
+  local s thr bps mbps
+  s="$(ask_req "Server IP:" "$GW")" || return
+  thr="$(ask_num "Min Mbps for PASS:" "${SITE_SPEED_MIN:-900}")" || return
+  clear; echo "\$ iperf3 -c $s   (judging against ${thr} Mbps)"
+  echo "------------------------------------------"
+  bps="$(iperf3 -c "$s" -J 2>/dev/null | jq -r '.end.sum_received.bits_per_second // empty')"
+  if [ -n "$bps" ]; then
+    mbps="$(awk -v b="$bps" 'BEGIN{printf "%.0f", b/1000000}')"
+    if [ "$mbps" -ge "$thr" ] 2>/dev/null; then
+      printf 'RESULT: %s Mbps  →  %sPASS%s  (≥ %s)\n' "$mbps" "$C_OK"  "$C_RST" "$thr"
+    else
+      printf 'RESULT: %s Mbps  →  %sFAIL%s  (< %s)\n' "$mbps" "$C_ERR" "$C_RST" "$thr"
+    fi
+  else
+    echo "iperf3 test failed — is a server running on $s:5201?"
+  fi
+  pause
+}
+
+m_wifi() {
+  if [ -z "$WIFACE" ]; then
+    clear; echo "No wireless interface found on this unit."; pause; return
+  fi
+  local k; k="$(menu "📡 WiFi ($WIFACE)" \
+    "wm|wavemon (live signal/noise)" \
+    "nm|Scan nearby APs (nmcli)" \
+    "iw|Scan nearby APs (iw)" \
+    "back|‹ back")"
+  case "$k" in
+    wm) run wavemon -i "$WIFACE" ;;
+    nm) run nmcli -f IN-USE,SSID,CHAN,SIGNAL,SECURITY device wifi list ;;
+    iw) run sudo iw dev "$WIFACE" scan ;;
+    *) return ;;
+  esac
+}
+
+m_packet() {
+  need_iface || return
+  local k; k="$(menu "🧰 Packet Inspection ($IFACE)" \
+    "ts|termshark (TUI Wireshark, live)" \
+    "td|tcpdump (quick capture)" \
+    "iftop|iftop (per-connection bandwidth)" \
+    "bw|bandwhich (per-process bandwidth)" \
+    "back|‹ back")"
+  case "$k" in
+    ts) local f; f="$(ask "Capture filter (blank = all):" "")"
+        if [ -n "$f" ]; then run termshark -i "$IFACE" -f "$f"; else run termshark -i "$IFACE"; fi ;;
+    td) local f; f="$(ask "Filter (e.g. 'port 53'):" "")"
+        runsh "sudo tcpdump -i $IFACE -n $f" ;;
+    iftop) run sudo iftop -i "$IFACE" ;;
+    bw) require bandwhich bandwhich || return; run sudo bandwhich ;;
+    *) return ;;
+  esac
+}
+
+m_dns() {
+  local k; k="$(menu "🌐 DNS / HTTP / Mail" \
+    "dig|dig (lookup a record)" \
+    "ptr|Reverse DNS (PTR)" \
+    "http|HTTP headers check" \
+    "port|Port open? (ncat)" \
+    "smtp|SMTP reachability + capabilities (EHLO)" \
+    "smtpsend|SMTP test send (device-alert check)" \
+    "back|‹ back")"
+  case "$k" in
+    dig) local d ty; d="$(ask_req "Domain:" "${SITE_DNS_DOMAIN:-modalav.co.uk}")" || return
+         ty="$(menu "Record type" "A|A" "AAAA|AAAA" "MX|MX" "TXT|TXT" "NS|NS" "CNAME|CNAME" "SOA|SOA")"
+         [ -z "$ty" ] && return
+         page dig +noall +answer "$d" "$ty" ;;
+    ptr) local ip; ip="$(ask_ip "IP:" "$GW")" || return; run dig -x "$ip" +short ;;
+    http) local u; u="$(ask_req "URL:" "${SITE_HTTP_URL:-https://modalav.co.uk}")" || return
+          if have xh; then run xh -I "$u"; else run curl -sSIL "$u"; fi ;;
+    port) local h p; h="$(ask_req "Host:" "$GW")" || return; p="$(ask_req "Port:" "443")" || return
+          run ncat -zv "$h" "$p" ;;
+    smtp) smtp_check ;;
+    smtpsend) smtp_send ;;
+    *) return ;;
+  esac
+}
+
+smtp_check() {
+  local h p; h="$(ask_req "SMTP server:" "${SITE_SMTP:-$GW}")" || return
+  p="$(ask_req "Port:" "${SITE_SMTP_PORT:-587}")" || return
+  if have swaks; then run swaks --server "$h:$p" --quit-after EHLO --timeout 10
+  else page nmap -Pn -p "$p" --script smtp-commands "$h"; fi
+}
+
+smtp_send() {
+  require swaks swaks || return
+  local h p from to tlsmode auth user defport
+  tlsmode="$(menu "Encryption" \
+    "starttls|STARTTLS (submission, 587)" \
+    "smtps|SMTPS / TLS-on-connect (465)" \
+    "none|None / plaintext (25)")"
+  [ -z "$tlsmode" ] && return
+  defport="${SITE_SMTP_PORT:-587}"
+  case "$tlsmode" in smtps) defport=465 ;; none) defport=25 ;; esac
+  h="$(ask_req "SMTP server:" "${SITE_SMTP:-$GW}")" || return
+  p="$(ask_req "Port:" "$defport")" || return
+  from="$(ask_req "From:" "netkit@$(hostname -f 2>/dev/null || hostname)")" || return
+  to="$(ask_req "To:" "")" || return
+  local cmd=(swaks --server "$h:$p" --from "$from" --to "$to" --timeout 15)
+  case "$tlsmode" in
+    starttls) cmd+=(--tls) ;;
+    smtps)    cmd+=(--tls-on-connect) ;;
+  esac
+  auth="$(ask "Use SMTP auth? (y/N):" "N")"
+  case "$auth" in
+    y|Y|yes|YES) user="$(ask_req "Auth username:" "")" || return
+                 cmd+=(--auth --auth-user "$user" --auth-hide-password) ;;
+  esac
+  run "${cmd[@]}"
+}
+
+m_lldp() {
+  local k; k="$(menu "🔌 Switch Port (LLDP / SNMP)" \
+    "show|Show neighbours (which switch/port/VLAN)" \
+    "watch|Watch neighbours (live)" \
+    "snmp|Monitor a device via SNMP (ports, PoE, traffic…)" \
+    "back|‹ back")"
+  case "$k" in
+    show) page sudo lldpcli show neighbors ;;
+    watch) run sudo watch -n2 lldpcli show neighbors ;;
+    snmp) m_snmp ;;
+    *) return ;;
+  esac
+}
+
+# ---------- SNMP device monitoring (v2c + v3) ----------
+G_SNMP_ARGS=()
+
+write_snmp_v3_conf() { # level user authproto authpass privproto privpass
+  local lvl="$1" u="$2" ap="$3" apass="$4" pp="$5" ppass="$6"
+  mkdir -p "$NETKIT_CFG_DIR"
+  ( umask 077
+    {
+      echo "defVersion 3"
+      echo "defSecurityLevel $lvl"
+      echo "defSecurityName $u"
+      echo "defAuthType $ap"
+      echo "defAuthPassphrase $apass"
+      if [ "$lvl" = "authPriv" ]; then
+        echo "defPrivType $pp"
+        echo "defPrivPassphrase $ppass"
+      fi
+    } > "$NETKIT_CFG_DIR/snmp.conf"
+  )
+  chmod 600 "$NETKIT_CFG_DIR/snmp.conf" 2>/dev/null || true
+}
+
+m_snmp() {
+  require snmpwalk snmp || return
+  local h ver
+  h="$(ask_req "Device IP:" "$GW")" || return
+  ver="$(menu "SNMP version" "v2c|v2c (community)" "v3|v3 (user + auth/priv)")"
+  [ -z "$ver" ] && return
+  if [ "$ver" = "v2c" ]; then
+    local c; c="$(ask_req "Community:" "${SITE_SNMP_COMMUNITY:-public}")" || return
+    G_SNMP_ARGS=(-v2c -c "$c" -t 2 -r 1)
+    unset SNMPCONFPATH 2>/dev/null || true
+  else
+    local user al ap pl pp
+    user="$(ask_req "v3 username:" "")" || return
+    al="$(menu "Auth protocol" "SHA|SHA" "MD5|MD5")"; [ -z "$al" ] && return
+    ap="$(ask_pw "Auth passphrase:")" || return
+    pl="$(menu "Privacy protocol" "AES|AES" "DES|DES" "none|none (authNoPriv)")"; [ -z "$pl" ] && return
+    if [ "$pl" = "none" ]; then
+      write_snmp_v3_conf "authNoPriv" "$user" "$al" "$ap" "" ""
+    else
+      pp="$(ask_pw "Privacy passphrase:")" || return
+      write_snmp_v3_conf "authPriv" "$user" "$al" "$ap" "$pl" "$pp"
+    fi
+    export SNMPCONFPATH="$NETKIT_CFG_DIR"
+    G_SNMP_ARGS=(-v3 -t 2 -r 1)
+  fi
+  while true; do
+    local k; k="$(menu --filter "📟 SNMP — $h ($ver)" \
+      "sys|System summary (model, name, uptime)" \
+      "ports|Interfaces (status + speed)" \
+      "rate|Port traffic — live bps (pick ifIndex)" \
+      "poe|PoE status + power budget" \
+      "walk|Walk an arbitrary OID" \
+      "scan|Find SNMP devices on a subnet" \
+      "back|‹ back")"
+    case "$k" in
+      sys)  page snmpwalk "${G_SNMP_ARGS[@]}" "$h" 1.3.6.1.2.1.1 ;;
+      ports) page snmp_if_table "$h" ;;
+      rate) snmp_rate "$h" ;;
+      poe)  page snmp_poe "$h" ;;
+      walk) local oid; oid="$(ask_req "OID:" "1.3.6.1.2.1.1")" || continue
+            page snmpwalk "${G_SNMP_ARGS[@]}" "$h" "$oid" ;;
+      scan) snmp_scan ;;
+      *) return ;;
+    esac
+  done
+}
+
+snmp_if_table() {
+  local h="$1"
+  local -a SW=(snmpwalk "${G_SNMP_ARGS[@]}" -Oqn "$h")
+  printf '%-6s %-26s %-8s %s\n' "idx" "interface" "status" "speed"
+  {
+    "${SW[@]}" 1.3.6.1.2.1.2.2.1.2; echo "---S---"
+    "${SW[@]}" 1.3.6.1.2.1.2.2.1.8; echo "---S---"
+    "${SW[@]}" 1.3.6.1.2.1.2.2.1.5
+  } | awk '
+    /---S---/ { sect++; next }
+    { idx=$1; sub(/.*\./,"",idx); v=$2; for(i=3;i<=NF;i++) v=v" "$i
+      if(sect==0) name[idx]=v; else if(sect==1) oper[idx]=v; else spd[idx]=v; seen[idx]=1 }
+    END{ for(i in seen){
+      s=oper[i]+0; st=(s==1?"up":s==2?"down":s==3?"testing":s==7?"lowerdn":"?")
+      sp=spd[i]+0; if(sp>=1e9) hs=sprintf("%gG",sp/1e9); else if(sp>=1e6) hs=sprintf("%gM",sp/1e6); else hs=sp
+      printf "%-6s %-26s %-8s %s\n", i, name[i], st, hs } }' | sort -n
+}
+
+snmp_poe() {
+  local h="$1"
+  local -a SW=(snmpwalk "${G_SNMP_ARGS[@]}" -Oqn "$h")
+  echo "== Main PSE (watts — vendor scaling may vary) =="
+  printf 'budget (pethMainPsePower):        '; "${SW[@]}" 1.3.6.1.2.1.105.1.3.1.1.2 2>/dev/null | awk '{print $2}' | paste -sd' ' -
+  printf 'consumed (pethMainPseConsumption): '; "${SW[@]}" 1.3.6.1.2.1.105.1.3.1.1.4 2>/dev/null | awk '{print $2}' | paste -sd' ' -
+  echo
+  echo "== Per-port detection status =="
+  local out
+  out="$("${SW[@]}" 1.3.6.1.2.1.105.1.1.1.6 2>/dev/null | awk '
+    { idx=$1; sub(/^.*\.105\.1\.1\.1\.6\./,"",idx); s=$2+0
+      st=(s==1?"disabled":s==2?"searching":s==3?"DELIVERING":s==4?"fault":s==5?"test":s==6?"otherFault":"?")
+      printf "  port %-8s %s\n", idx, st }')"
+  if [ -n "$out" ]; then echo "$out"
+  else echo "  (no POWER-ETHERNET-MIB data — not a PoE switch, or it uses a vendor MIB)"; fi
+}
+
+snmp_rate() {
+  local h="$1" idx
+  idx="$(ask_num "ifIndex (from the Interfaces list):" "")" || return
+  run snmpdelta "${G_SNMP_ARGS[@]}" -Cs -CT "$h" \
+    "1.3.6.1.2.1.31.1.1.1.6.$idx" "1.3.6.1.2.1.31.1.1.1.10.$idx"
+}
+
+snmp_scan() {
+  local net comm
+  net="$(ask_cidr "Subnet:" "$CIDR")" || return
+  comm="$(ask_req "Community for probe:" "${SITE_SNMP_COMMUNITY:-public}")" || return
+  page sudo nmap -sU -p161 --open --script snmp-info --script-args "snmp.community=$comm" "$net"
+}
+
+m_iot() {
+  local k; k="$(menu "🏠 Smart Home / IoT" \
+    "sub|MQTT subscribe (watch a topic)" \
+    "pub|MQTT publish (send a test message)" \
+    "wol|Wake-on-LAN (send magic packet)" \
+    "back|‹ back")"
+  case "$k" in
+    sub) require mosquitto_sub mosquitto-clients || return
+         local h t; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || return
+         t="$(ask "Topic (blank = # = all):" "#")"; [ -z "$t" ] && t="#"
+         run mosquitto_sub -h "$h" -t "$t" -v ;;
+    pub) require mosquitto_pub mosquitto-clients || return
+         local h t m; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || return
+         t="$(ask_req "Topic:" "netkit/test")" || return
+         m="$(ask_req "Message:" "hello")" || return
+         run mosquitto_pub -h "$h" -t "$t" -m "$m" ;;
+    wol) require wakeonlan wakeonlan || return
+         local mac; mac="$(ask_req "Target MAC (aa:bb:cc:dd:ee:ff):" "")" || return
+         run wakeonlan "$mac" ;;
+    *) return ;;
+  esac
+}
+
+m_avoip() {
+  need_iface || return
+  local k; k="$(menu "🎚 AV-over-IP ($IFACE)" \
+    "igmp|IGMP querier + reports (passive watch)" \
+    "groups|Discover multicast groups (nmap)" \
+    "joined|Multicast groups joined on this host" \
+    "omping|Multicast flow test (needs 2nd device)" \
+    "ptpwatch|PTP traffic + grandmaster (passive)" \
+    "ptpmon|PTP offset monitor (runs ptp4l client)" \
+    "back|‹ back")"
+  case "$k" in
+    igmp) runsh "sudo tcpdump -i $IFACE -n -v igmp" ;;
+    groups) page sudo nmap --script broadcast-igmp-discovery -e "$IFACE" ;;
+    joined) run ip maddr show ;;
+    omping) if have omping; then
+              local self peer; self="$(ask_req "This device IP:" "${SELFIP:-}")" || return
+              peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || return
+              run omping "$self" "$peer"
+            else clear; echo "omping not installed (best-effort; may be absent in apt)."; echo "Single-device checks above still work."; pause; fi ;;
+    ptpwatch) runsh "sudo tcpdump -i $IFACE -n -v udp port 319 or udp port 320" ;;
+    ptpmon) require ptp4l linuxptp || return
+            clear
+            echo "Runs a PTP client on $IFACE to read offset from the grandmaster."
+            echo "NOTE: this may step the system clock. Ctrl-C to stop."
+            echo
+            read -rp "↩ Enter to start (Ctrl-C to cancel)… " _
+            runsh "sudo ptp4l -i $IFACE -s -m -S" ;;
+    *) return ;;
+  esac
+}
+
+m_rf() {
+  local k; k="$(menu "📶 Bluetooth / RF" \
+    "btscan|Bluetooth scan (BLE + classic, onboard)" \
+    "btinfo|Bluetooth adapter info" \
+    "btmon|Bluetooth live monitor (HCI trace)" \
+    "sub|Sub-GHz decode 433/868 MHz (RTL-SDR)" \
+    "mqtt|Sub-GHz → MQTT (publish decoded sensors)" \
+    "sweep|Spectrum sweep (RTL-SDR → CSV)" \
+    "sdrtest|Test RTL-SDR dongle is present" \
+    "back|‹ back")"
+  case "$k" in
+    btscan) bt_scan ;;
+    btinfo) require bluetoothctl bluez || return; run bluetoothctl show ;;
+    btmon) require btmon bluez || return; run sudo btmon ;;
+    sub) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
+         local fr; fr="$(ask_req "Frequency:" "433.92M")" || return
+         runsh "rtl_433 -f $fr" ;;
+    mqtt) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
+          local fr br; br="$(ask_req "MQTT broker IP:" "${SITE_MQTT:-$GW}")" || return
+          fr="$(ask_req "Frequency:" "433.92M")" || return
+          runsh "rtl_433 -f $fr -F mqtt://$br:1883" ;;
+    sweep) require rtl_power "rtl-sdr + RTL-SDR dongle" || return
+           local lo hi out; lo="$(ask_req "Start freq:" "433M")" || return
+           hi="$(ask_req "End freq:" "435M")" || return
+           out="$(report_dir)/sweep-$(date +%Y%m%d-%H%M).csv"
+           runsh "rtl_power -f ${lo}:${hi}:1k -g 25 -i 1 -1 '$out' && echo \"Wrote $out\"" ;;
+    sdrtest) require rtl_test rtl-sdr || return; run rtl_test -t ;;
+    *) return ;;
+  esac
+}
+
+bt_scan() {
+  require bluetoothctl bluez || return
+  local secs; secs="$(ask_num "Scan seconds:" "12")" || return
+  clear
+  echo "\$ bluetoothctl --timeout $secs scan on"
+  echo "------------------------------------------"
+  bluetoothctl power on >/dev/null 2>&1
+  bluetoothctl --timeout "$secs" scan on
+  echo; echo "Discovered devices:"; bluetoothctl devices
+  pause
+}
+
+m_report() {
+  local k; k="$(menu "📊 Reporting" \
+    "snap|Site snapshot → markdown report" \
+    "sweep|Full sweep → branded report (PDF-ready)" \
+    "savelast|Save last viewed output → report" \
+    "vnstat|vnstat traffic summary" \
+    "rec|Record terminal session (asciinema)" \
+    "back|‹ back")"
+  case "$k" in
+    snap) gen_report ;;
+    sweep) gen_sweep ;;
+    savelast) save_last_report ;;
+    vnstat) run vnstat ;;
+    rec) local f; f="$(report_dir)/session-$(date +%Y%m%d-%H%M).cast"; run asciinema rec "$f" ;;
+    *) return ;;
+  esac
+}
+
+# Append the most recent paged output (set by page()) to a dated capture file.
+save_last_report() {
+  if [ -z "$NETKIT_LAST_OUTPUT" ]; then
+    clear; echo "Nothing captured yet — run a check that pages its output first."; pause; return
+  fi
+  local dir f fence ts; dir="$(report_dir)"; f="$dir/captures-$(date +%Y%m%d).md"
+  fence='```'; ts="$(date '+%H:%M:%S')"
+  printf '\n## %s\n\n%s\n%s\n%s\n' "$ts" "$fence" "$NETKIT_LAST_OUTPUT" "$fence" >> "$f"
+  clear; echo "Appended to $f"; pause
+}
+
+m_system() {
+  local k; k="$(menu "⚙️ System / Network info" \
+    "if|Interface overview" \
+    "eth|Wired link speed/duplex (ethtool)" \
+    "subnet|Subnet calculator (ipcalc)" \
+    "rt|Routing table" \
+    "dns|DNS resolver status" \
+    "dash|Live tiled dashboard (tmux)" \
+    "back|‹ back")"
+  case "$k" in
+    if) run ip -c -br addr ;;
+    eth) require ethtool ethtool || return
+         local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || return
+         run ethtool "$dev" ;;
+    subnet) require ipcalc ipcalc || return
+            local c; c="$(ask_cidr "Address/CIDR:" "${CIDR:-192.168.1.0/24}")" || return
+            run ipcalc "$c" ;;
+    rt) run ip -c route ;;
+    dns) if have resolvectl; then run resolvectl status; else run cat /etc/resolv.conf; fi ;;
+    dash) run_dash ;;
+    *) return ;;
+  esac
+}
+
+# ---------- report generators ----------
+gen_report() {
+  need_iface || return
+  local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/snapshot-$ts.md"
+  clear
+  echo "Gathering snapshot (arp-scan + nmap ping sweep)… a few seconds."
+  local arp nmap_sn
+  arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
+  nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
+
+  cat > "$f" <<RPT
+# Network Site Snapshot
+
+- **Date:** $(date '+%Y-%m-%d %H:%M %Z')
+- **Captured from:** $(hostname) (${SELFIP:-no-ip}) on \`${IFACE}\`
+- **Gateway:** ${GW:-none}
+- **Subnet:** ${CIDR:-none}
+
+## Interfaces
+\`\`\`
+$(ip -br addr)
+\`\`\`
+
+## Routing
+\`\`\`
+$(ip route)
+\`\`\`
+
+## Layer-2 hosts (arp-scan)
+\`\`\`
+$arp
+\`\`\`
+
+## Live hosts (nmap ping sweep)
+\`\`\`
+$nmap_sn
+\`\`\`
+
+## LLDP neighbour (switch / port / VLAN)
+\`\`\`
+$(sudo lldpcli show neighbors 2>/dev/null || echo 'no LLDP neighbour seen')
+\`\`\`
+
+---
+*Generated by netkit v${NETKIT_VERSION}.*
+RPT
+
+  clear; echo "Report written: $f"; echo
+  if have glow; then glow -p "$f"; else cat "$f"; fi
+  echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""
+  pause
+}
+
+gen_sweep() {
+  need_iface || return
+  local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/sweep-$ts.md"
+  clear; echo "Running full sweep — this can take a minute…"
+  local arp nmap_sn lldp dhcp wan hosts logo
+  arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
+  nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
+  hosts="$(printf '%s\n' "$nmap_sn" | grep -c 'Nmap scan report')"
+  lldp="$(sudo lldpcli show neighbors 2>/dev/null || echo 'no LLDP neighbour seen')"
+  dhcp="$(sudo nmap --script broadcast-dhcp-discover -e "$IFACE" 2>/dev/null | sed -n '/broadcast-dhcp-discover/,$p' || echo 'n/a')"
+  if have librespeed-cli; then wan="$(librespeed-cli --no-icmp 2>/dev/null || echo 'WAN test failed')"
+  else wan='librespeed-cli not installed'; fi
+  logo=""
+  [ -n "${SITE_LOGO:-}" ] && [ -f "$SITE_LOGO" ] && logo="![logo]($SITE_LOGO)"
+
+  cat > "$f" <<RPT
+$logo
+
+# Network Commissioning Report
+
+- **Site:** ${NETKIT_SITE:-unnamed}
+- **Date:** $(date '+%Y-%m-%d %H:%M %Z')
+- **Captured from:** $(hostname) (${SELFIP:-no-ip}) on \`$IFACE\`
+- **Gateway:** ${GW:-none}   **Subnet:** ${CIDR:-none}
+
+## Summary
+- Live hosts found: ${hosts:-0}
+- WAN throughput: see section below
+
+## Interfaces
+\`\`\`
+$(ip -br addr)
+\`\`\`
+
+## Routing
+\`\`\`
+$(ip route)
+\`\`\`
+
+## DHCP servers (rogue check)
+\`\`\`
+$dhcp
+\`\`\`
+
+## Layer-2 hosts (arp-scan)
+\`\`\`
+$arp
+\`\`\`
+
+## Live hosts (nmap)
+\`\`\`
+$nmap_sn
+\`\`\`
+
+## LLDP neighbour (switch / port / VLAN)
+\`\`\`
+$lldp
+\`\`\`
+
+## WAN throughput
+\`\`\`
+$wan
+\`\`\`
+
+---
+*Generated by netkit v${NETKIT_VERSION}.*
+RPT
+
+  clear; echo "Report written: $f"; echo
+  if have glow; then glow -p "$f"; else cat "$f"; fi
+  echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""
+  pause
+}
+
+run_dash() {
+  require tmux tmux || return
+  need_iface || return
+  local S="netkit-dash"
+  tmux kill-session -t "$S" 2>/dev/null
+  local pinger="ping ${GW:-1.1.1.1}"; have gping && pinger="gping ${GW:-1.1.1.1}"
+  tmux new-session -d -s "$S" -n dash "watch -n2 'ip -br addr; echo; ip route'"
+  tmux split-window -h -t "$S":0 "$pinger"
+  tmux split-window -v -t "$S":0.0 "mtr ${GW:-1.1.1.1}"
+  tmux split-window -v -t "$S":0.1 "vnstat -l -i $IFACE 2>/dev/null || watch -n2 'cat /proc/net/dev'"
+  tmux select-layout -t "$S":0 tiled
+  tmux attach -t "$S"
+}
+
+# ---------- prebuilt-binary registry (shared by setup + doctor) ----------
+PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh)
+PREBUILT_RX=(
+  'linux_arm64\.tar\.gz$'
+  '(aarch64|arm64).*linux.*tar\.gz$|linux.*(musl|gnu).*(aarch64|arm64).*tar\.gz$'
+  'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
+  'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
+)
+PREBUILT_BIN=(librespeed-cli gping bandwhich xh)
+PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)')
+
+install_release_bin() { # repo  asset_regex  binname  friendly
+  local repo="$1" rx="$2" bin="$3" friendly="${4:-$3}" url tmp found
+  if have "$bin"; then ok "$friendly already present"; return 0; fi
+  url="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
+        | jq -r '.assets[].browser_download_url' 2>/dev/null \
+        | grep -Ei "$rx" | head -n1)"
+  if [ -z "$url" ]; then warn "$friendly: no matching aarch64 asset found — skipped"; return 1; fi
+  tmp="$(mktemp -d)"
+  if spin "$friendly: downloading…" curl -fsSL "$url" -o "$tmp/dl"; then
+    case "$url" in
+      *.tar.gz|*.tgz) tar -xzf "$tmp/dl" -C "$tmp" 2>/dev/null ;;
+      *.tar.xz)       tar -xJf "$tmp/dl" -C "$tmp" 2>/dev/null ;;
+      *.zip)          unzip -q "$tmp/dl" -d "$tmp" 2>/dev/null ;;
+      *)              cp "$tmp/dl" "$tmp/$bin" ;;
+    esac
+    found="$(find "$tmp" -type f -name "$bin" | head -n1)"
+    if [ -n "$found" ]; then
+      sudo install -m 0755 "$found" "$NETKIT_BIN_DIR/$bin" && ok "$friendly installed"
+    else
+      warn "$friendly: binary not found inside archive — skipped"
+    fi
+  else
+    warn "$friendly: download failed — skipped"
+  fi
+  rm -rf "$tmp"
+}
+
+do_setup() {
+  if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+    echo "Run 'netkit setup' as your normal user (it calls sudo where needed)."; exit 1
+  fi
+  sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
+  say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail…)"
+  local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
+              bluez bluez-tools rtl-433 rtl-sdr swaks)
+  spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
+  if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
+    ok "apt extras installed"
+  else
+    warn "Some apt packages failed — re-run: sudo apt-get install ${pkgs[*]}"
+  fi
+
+  say "Installing AV/IPv6 extras (best-effort; skipped if not in apt)"
+  local p
+  for p in omping linuxptp ndisc6; do
+    if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" >/dev/null 2>&1; then ok "$p"
+    else warn "$p unavailable in apt — skipped"; fi
+  done
+
+  if getent group bluetooth >/dev/null 2>&1; then
+    sudo usermod -aG bluetooth "$USER" 2>/dev/null \
+      && ok "added $USER to 'bluetooth' group (log out/in to apply)"
+  fi
+
+  say "Fetching prebuilt aarch64 binaries (GitHub latest releases)"
+  local i
+  for i in "${!PREBUILT_REPOS[@]}"; do
+    install_release_bin "${PREBUILT_REPOS[$i]}" "${PREBUILT_RX[$i]}" "${PREBUILT_BIN[$i]}" "${PREBUILT_NAME[$i]}"
+  done
+
+  say "Setup complete"
+  echo "Tip: run 'netkit selftest' to confirm, and 'netkit doctor' to pre-check binary matchers."
+}
+
+do_selftest() {
+  clear; banner
+  status_line
+  echo
+  say "Core tools"
+  local t tools=(nmap arp-scan iperf3 mtr tcpdump dig lldpcli avahi-browse tmux gum)
+  for t in "${tools[@]}"; do
+    if have "$t"; then ok "$t"; else warn "$t MISSING"; fi
+  done
+  say "Optional extras"
+  local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
+                  ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
+                  omping ptp4l rdisc6)
+  for x in "${extras[@]}"; do
+    if have "$x"; then ok "$x"; else warn "$x missing (run: netkit setup)"; fi
+  done
+  say "Live checks"
+  if [ -n "$GW" ] && ping -c1 -W2 "$GW" >/dev/null 2>&1; then ok "gateway $GW reachable"
+  elif [ -n "$GW" ]; then warn "gateway $GW not answering ping"
+  else warn "no default gateway"; fi
+  if [ -n "$CIDR" ]; then
+    local up; up="$(sudo nmap -sn "$CIDR" 2>/dev/null | grep -c 'Nmap scan report')"
+    ok "nmap ping sweep $CIDR -> ${up:-0} host(s) up"
+  fi
+  echo
+}
+
+do_doctor() {
+  echo "netkit doctor — checking prebuilt-binary release matchers against GitHub"
+  echo
+  local i url
+  for i in "${!PREBUILT_REPOS[@]}"; do
+    url="$(curl -fsSL "https://api.github.com/repos/${PREBUILT_REPOS[$i]}/releases/latest" 2>/dev/null \
+          | jq -r '.assets[].browser_download_url' 2>/dev/null \
+          | grep -Ei "${PREBUILT_RX[$i]}" | head -n1)"
+    if have "${PREBUILT_BIN[$i]}"; then
+      printf '  installed  %-13s\n' "${PREBUILT_BIN[$i]}"
+    elif [ -n "$url" ]; then
+      printf '  resolves   %-13s -> %s\n' "${PREBUILT_BIN[$i]}" "$(basename "$url")"
+    else
+      printf '  NO MATCH   %-13s (asset naming may have changed)\n' "${PREBUILT_BIN[$i]}"
+    fi
+  done
+  echo
+  echo "‘NO MATCH’ means the matcher needs updating; ‘resolves’ means setup would install it."
+}
+
+do_update() {
+  local url="${1:-}"
+  mkdir -p "$NETKIT_CFG_DIR"
+  if [ -n "$url" ]; then printf '%s\n' "$url" > "$NETKIT_CFG_DIR/update.url"
+  elif [ -f "$NETKIT_CFG_DIR/update.url" ]; then url="$(cat "$NETKIT_CFG_DIR/update.url")"; fi
+  if [ -z "$url" ]; then
+    echo "No update URL set. Pass the Raw gist URL once and it'll be remembered:"
+    echo "  netkit update 'https://gist.githubusercontent.com/<user>/<id>/raw/netkit'"
+    exit 1
+  fi
+  local tmp; tmp="$(mktemp)"
+  if ! curl -fsSL "$url" -o "$tmp"; then echo "Download failed: $url"; rm -f "$tmp"; exit 1; fi
+  if [ "$(head -1 "$tmp")" != "#!/usr/bin/env bash" ]; then
+    echo "Refusing to install: fetched file isn't a bash script (got HTML?)."
+    echo "Make sure you copied the *Raw* gist URL, not the gist web page."
+    rm -f "$tmp"; exit 1
+  fi
+  if sudo install -m 0755 "$tmp" "$NETKIT_BIN"; then
+    echo "Updated $NETKIT_BIN -> $(grep -m1 'NETKIT_VERSION=' "$NETKIT_BIN" | cut -d'"' -f2)"
+  else
+    echo "Install failed (need sudo rights to $NETKIT_BIN)."
+  fi
+  rm -f "$tmp"
+}
+
+do_uninstall() {
+  echo "This removes $NETKIT_BIN only."
+  echo "It leaves apt packages, ~/.config/netkit, and ~/netkit-reports in place."
+  local a; a="$(ask "Remove netkit? (y/N):" "N")"
+  case "$a" in
+    y|Y|yes|YES) sudo rm -f "$NETKIT_BIN" && echo "Removed $NETKIT_BIN." ;;
+    *) echo "Cancelled." ;;
+  esac
+}
+
+# ---------- boot-to-netkit (explicit, reversible) ----------
+do_autostart() {
+  case "${1:-}" in
+    on)
+      echo "This will:"
+      echo "  • enable console autologin for '$USER' on tty1 (systemd drop-in)"
+      echo "  • launch netkit on tty1 login via a guarded ~/.bash_profile block"
+      echo "It edits system config but is fully reversible: netkit autostart off"
+      local a; a="$(ask "Proceed? (y/N):" "N")"
+      case "$a" in y|Y|yes|YES) ;; *) echo "Cancelled."; return ;; esac
+      sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
+      # shellcheck disable=SC2016  # $TERM must stay literal — systemd expands it at boot
+      printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin %s --noclear %%I $TERM\n' "$USER" \
+        | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
+      if ! grep -qF '# >>> netkit autostart >>>' "$HOME/.bash_profile" 2>/dev/null; then
+        # If ~/.bash_profile doesn't exist yet, creating it would stop bash from
+        # reading ~/.profile on login. Seed it to source ~/.profile first.
+        if [ ! -f "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
+          # shellcheck disable=SC2016  # literal — sourced at login, not now
+          printf '%s\n' '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' > "$HOME/.bash_profile"
+        fi
+        {
+          echo '# >>> netkit autostart >>>'
+          # shellcheck disable=SC2016  # must stay literal — evaluated at login, not now
+          echo 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "${SSH_TTY:-}" ]; then exec netkit; fi'
+          echo '# <<< netkit autostart <<<'
+        } >> "$HOME/.bash_profile"
+      fi
+      sudo systemctl daemon-reload
+      echo "Autostart enabled. Reboot to test."
+      ;;
+    off)
+      sudo rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
+      sudo systemctl daemon-reload 2>/dev/null || true
+      [ -f "$HOME/.bash_profile" ] && \
+        sed -i '/# >>> netkit autostart >>>/,/# <<< netkit autostart <<</d' "$HOME/.bash_profile"
+      echo "Autostart removed."
+      ;;
+    *) echo "Usage: netkit autostart on|off" ;;
+  esac
+}
+
+usage() {
+  cat <<EOF
+netkit v${NETKIT_VERSION} — Pi 5 network toolkit
+  netkit               interactive dashboard
+  netkit dash          tiled live view (tmux)
+  netkit report        markdown site snapshot
+  netkit sweep         full commissioning sweep → branded report
+  netkit setup         install/refresh extra deps
+  netkit selftest      bench check
+  netkit doctor        check prebuilt-binary matchers vs GitHub
+  netkit site [name]   site profiles (prefill prompts per location)
+  netkit autostart on|off   boot the unit straight into netkit
+  netkit update [URL]  re-pull this script from a Raw gist URL
+  netkit uninstall     remove the netkit binary
+  netkit version       print version
+EOF
+}
+
+# ---------- quick actions (curated; dispatch table, touches no m_* function) ----------
+quick_run() {
+  case "$1" in
+    gw)       run ping -c4 "${GW:-1.1.1.1}" ;;
+    arp)      need_iface || return; require arp-scan arp-scan || return
+              run sudo arp-scan --interface="$IFACE" --localnet ;;
+    nsn)      local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
+    lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
+    selftest) clear; do_selftest; pause ;;
+    sweep)    gen_sweep ;;
+    *) : ;;
+  esac
+}
+
+m_quick() {
+  local k; k="$(menu "⚡ Quick checks" \
+    "gw|Ping gateway" \
+    "arp|ARP sweep (layer-2)" \
+    "nsn|Nmap ping sweep" \
+    "lldp|LLDP neighbour (switch / port)" \
+    "selftest|Self-test (tools + live network)" \
+    "sweep|Full sweep → report" \
+    "back|‹ back")"
+  case "$k" in ""|back) return ;; *) quick_run "$k" ;; esac
+}
+
+show_help() {
+  local -a pager=(less -R); have gum && pager=(gum pager)
+  cat <<'H' | "${pager[@]}"
+netkit — quick help
+
+NAVIGATION
+  up/down or type   move / filter (where enabled)
+  Enter             select
+  Esc               cancel / go back
+  Ctrl-C            stop the running check, return to the menu
+  Enter (return)    leave a result screen
+
+CATEGORIES
+  Quick        the checks you run at every drop
+  Discovery    who's on the wire (arp, fping, nmap, mDNS, AV gear, IPv6)
+  Link         iperf3 + PASS/FAIL, WAN speed, mtr, ping graph
+  WiFi         wavemon, AP scans
+  Packet       termshark, tcpdump, iftop, bandwhich
+  DNS/HTTP     dig, PTR, HTTP headers, port check, SMTP
+  LLDP/SNMP    switch neighbour, SNMP (ports, PoE, traffic) - v2c/v3
+  AV-over-IP   IGMP, multicast groups, omping, PTP
+  IoT          MQTT, Wake-on-LAN
+  BT/RF        Bluetooth, RTL-SDR (433/868), spectrum sweep
+  Reporting    snapshot, full sweep, save-last-output, vnstat, asciinema
+  System       interfaces, ethtool, ipcalc, routes, DNS, tmux dash
+  Site         per-location prefilled defaults
+
+TIPS
+  - Missing a tool? netkit offers to run 'netkit setup' on the spot.
+  - NO_COLOR=1 netkit  disables colour.
+  - Reports land in ~/netkit-reports/<site>/<date>/
+H
+}
+
+# One-time nudge on a fresh unit (gated by a flag file so it never nags).
+first_run_check() {
+  local flag="$NETKIT_CFG_DIR/onboarded"
+  [ -f "$flag" ] && return 0
+  mkdir -p "$NETKIT_CFG_DIR"
+  clear; banner; echo
+  if ! have nmap || ! have gum; then warn "Some core tools look missing — run 'netkit setup'."; fi
+  [ -z "$NETKIT_SITE" ] && warn "No active site — set one under 🏷 Site to prefill prompts."
+  echo "  Pick ❓ Help / keys any time for a cheat-sheet."
+  echo; pause
+  : > "$flag"
+}
+
+# ---------- main ----------
+load_site
+
+case "${1:-}" in
+  dash) run_dash; exit 0 ;;
+  report) gen_report; exit 0 ;;
+  sweep) gen_sweep; exit 0 ;;
+  setup|--setup) do_setup; exit 0 ;;
+  selftest|--selftest) do_selftest; exit 0 ;;
+  doctor|--doctor) do_doctor; exit 0 ;;
+  site|--site) do_site "${2:-}"; exit 0 ;;
+  autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;
+  update|--update) do_update "${2:-}"; exit 0 ;;
+  uninstall|--uninstall) do_uninstall; exit 0 ;;
+  version|--version|-v) echo "netkit v${NETKIT_VERSION}"; exit 0 ;;
+  help|--help|-h) usage; exit 0 ;;
+esac
+
+# Ctrl-C aborts the current ACTION and bounces back to the menu rather than
+# killing netkit mid-job. A foreground child (tcpdump, ptp4l, wavemon…) receives
+# the SIGINT first and exits; because `set -e` is off, control then falls through
+# to the action's pause and back here. The handler only restores the terminal —
+# it must NOT call continue/break (it can fire inside a $() subshell).
+netkit_on_int() { stty sane 2>/dev/null || true; printf '\n'; }
+trap 'netkit_on_int' INT
+
+first_run_check
+
+while true; do
+  clear; banner
+  status_line; echo
+  k="$(menu --filter "Pick a category" \
+    "quick|⚡ Quick checks" \
+    "discovery|🔍 Discovery" \
+    "link|🔗 Link & Throughput" \
+    "wifi|📡 WiFi" \
+    "packet|🧰 Packet Inspection" \
+    "dns|🌐 DNS / HTTP / Mail" \
+    "lldp|🔌 Switch Port (LLDP / SNMP)" \
+    "avoip|🎚 AV-over-IP (multicast / PTP)" \
+    "iot|🏠 Smart Home / IoT" \
+    "rf|📶 Bluetooth / RF" \
+    "report|📊 Reporting" \
+    "system|⚙️ System / Network info" \
+    "site|🏷 Site profile" \
+    "help|❓ Help / keys" \
+    "quit|✖ Quit")"
+  case "$k" in
+    quick) m_quick ;;
+    discovery) m_discovery ;;
+    link) m_link ;;
+    wifi) m_wifi ;;
+    packet) m_packet ;;
+    dns) m_dns ;;
+    lldp) m_lldp ;;
+    avoip) m_avoip ;;
+    iot) m_iot ;;
+    rf) m_rf ;;
+    report) m_report ;;
+    system) m_system ;;
+    site) m_site ;;
+    help) show_help ;;
+    *) clear; exit 0 ;;
+  esac
+done
