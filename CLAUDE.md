@@ -53,7 +53,7 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
 2. **Helpers** (top of file) — the vocabulary every menu action is built from:
    `have`, `require <cmd> [hint]` (offer-to-setup guard for optional tools),
    one colour palette (`C_OK/C_WARN/C_ERR/C_HDR/C_RST`, honours `NO_COLOR`/non-tty),
-   `menu [--filter] "Header" "key|Label" …` (gum chooser; `--filter` = type-to-filter),
+   `menu "Header" "key|Label" …` (gum chooser; arrow/scroll list, returns chosen key),
    `ask`/`ask_req`/`ask_pw` and validating `ask_num`/`ask_ip`/`ask_cidr`, `pause`,
    `run`/`runsh` (clear → echo command → run → pause), `page` (capture + pager for long
    **batch** output), `spin` (gum progress for slow hidden-output steps),

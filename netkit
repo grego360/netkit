@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.1.0"
+NETKIT_VERSION="4.1.1"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -58,21 +58,16 @@ banner() {
   fi
 }
 
-# menu [--filter] "Header" "key|Label" ... -> prints the chosen key (empty if
-# cancelled). --filter uses type-to-filter (gum filter) for long menus.
+# menu "Header" "key|Label" ... -> prints the chosen key (empty if cancelled).
+# Plain arrow/scroll list (gum choose) — a search box (gum filter) is the wrong
+# widget here: scrolling injects stray input into the query and re-filters the list.
 menu() {
-  local mode="choose"
-  [ "${1:-}" = "--filter" ] && { mode="filter"; shift; }
   local header="$1"; shift
   local labels=() keys=() pair
   for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
   local chosen=""
   if have gum; then
-    if [ "$mode" = "filter" ]; then
-      chosen="$(printf '%s\n' "${labels[@]}" | gum filter --placeholder "$header — type to filter · esc cancels" --height 18)"
-    else
-      chosen="$(printf '%s\n' "${labels[@]}" | gum choose --header "$header   (esc cancels)" --height 18)"
-    fi
+    chosen="$(printf '%s\n' "${labels[@]}" | gum choose --header "$header   (esc cancels)" --height 18)"
   else
     local PS3="$header > " opt
     select opt in "${labels[@]}"; do chosen="$opt"; break; done
@@ -615,7 +610,7 @@ m_snmp() {
     G_SNMP_ARGS=(-v3 -t 2 -r 1)
   fi
   while true; do
-    local k; k="$(menu --filter "📟 SNMP — $h ($ver)" \
+    local k; k="$(menu "📟 SNMP — $h ($ver)" \
       "sys|System summary (model, name, uptime)" \
       "ports|Interfaces (status + speed)" \
       "rate|Port traffic — live bps (pick ifIndex)" \
@@ -1225,7 +1220,7 @@ show_help() {
 netkit — quick help
 
 NAVIGATION
-  up/down or type   move / filter (where enabled)
+  up/down           move
   Enter             select
   Esc               cancel / go back
   Ctrl-C            stop the running check, return to the menu
@@ -1297,7 +1292,7 @@ first_run_check
 while true; do
   clear; banner
   status_line; echo
-  k="$(menu --filter "Pick a category" \
+  k="$(menu "Pick a category" \
     "quick|⚡ Quick checks" \
     "discovery|🔍 Discovery" \
     "link|🔗 Link & Throughput" \

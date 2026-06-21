@@ -10,7 +10,7 @@ copying that one file to `/usr/local/bin/netkit` and marking it executable.
 The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 `netkit setup`.
 
-**Current version: 4.1.0**
+**Current version: 4.1.1**
 
 ---
 
@@ -45,8 +45,8 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 - `require <cmd> [hint]` — guard for an optional tool: if missing, offers to run
   `netkit setup` on the spot, then proceeds if it got installed. Use
   `require X "<pkg>" || return` instead of hand-rolled "not installed" messages.
-- `menu [--filter] "Header" "key|Label" …` — gum-backed chooser, returns the chosen
-  key. `--filter` switches to type-to-filter (`gum filter`) for long menus.
+- `menu "Header" "key|Label" …` — gum-backed chooser (arrow/scroll list via
+  `gum choose`), returns the chosen key
 - `ask <prompt> <default>` / `ask_req …` (aborts on empty) / `ask_pw <prompt>` (hidden)
 - `ask_num` / `ask_ip` / `ask_cidr` — validating prompts (loop until valid or cancelled)
 - `pause` — "Enter to return"
