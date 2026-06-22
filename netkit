@@ -707,7 +707,10 @@ m_discovery() {
   case "$k" in
     arp) need_iface || return; run sudo arp-scan --interface="$IFACE" --localnet ;;
     fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
-         require fping fping || return; runsh "fping -a -g $n 2>/dev/null" ;;
+         require fping fping || return
+         # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
+         clear; printf '$ fping -a -g %s\n%s\n' "$n" "------------------------------------------"
+         fping -a -g "$n" 2>/dev/null; pause ;;
     nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
     nsv) local h; h="$(ask_req "Host:" "$GW")" || return; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
     dhcp) need_iface || return; run sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
@@ -742,7 +745,10 @@ m_ipv6() {
     "lookup|Neighbour lookup (ndisc6 <addr>)" \
     "back|‹ back")"
   case "$k" in
-    nbr) runsh "ping -6 -c2 ff02::1%$IFACE >/dev/null 2>&1; ip -6 neigh show dev $IFACE" ;;
+    nbr) # Quoted args, no bash -c: prime the neighbour cache, then show it.
+         clear; printf '$ ip -6 neigh show dev %s   (after multicast ping)\n%s\n' "$IFACE" "------------------------------------------"
+         ping -6 -c2 "ff02::1%$IFACE" >/dev/null 2>&1
+         ip -6 neigh show dev "$IFACE"; pause ;;
     rtr) require rdisc6 ndisc6 || return; run rdisc6 "$IFACE" ;;
     lookup) require ndisc6 ndisc6 || return
             local a; a="$(ask_req "IPv6 address:" "")" || return; run ndisc6 "$a" "$IFACE" ;;
@@ -1057,7 +1063,7 @@ m_avoip() {
     "ptpmon|PTP offset monitor (runs ptp4l client)" \
     "back|‹ back")"
   case "$k" in
-    igmp) runsh "sudo tcpdump -i $IFACE -n -v igmp" ;;
+    igmp) run sudo tcpdump -i "$IFACE" -n -v igmp ;;
     groups) page sudo nmap --script broadcast-igmp-discovery -e "$IFACE" ;;
     joined) run ip maddr show ;;
     omping) if have omping; then
@@ -1065,14 +1071,14 @@ m_avoip() {
               peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || return
               run omping "$self" "$peer"
             else clear; echo "omping not installed (best-effort; may be absent in apt)."; echo "Single-device checks above still work."; pause; fi ;;
-    ptpwatch) runsh "sudo tcpdump -i $IFACE -n -v udp port 319 or udp port 320" ;;
+    ptpwatch) run sudo tcpdump -i "$IFACE" -n -v udp port 319 or udp port 320 ;;
     ptpmon) require ptp4l linuxptp || return
             clear
             echo "Runs a PTP client on $IFACE to read offset from the grandmaster."
             echo "NOTE: this may step the system clock. Ctrl-C to stop."
             echo
             read -rp "↩ Enter to start (Ctrl-C to cancel)… " _
-            runsh "sudo ptp4l -i $IFACE -s -m -S" ;;
+            run sudo ptp4l -i "$IFACE" -s -m -S ;;
     *) return ;;
   esac
 }
