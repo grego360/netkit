@@ -1589,13 +1589,15 @@ m_knx() {
 # ---------- report generators ----------
 gen_report() {
   need_iface || return
+  local snmp_h="${1:-}" snmp_c="${2:-public}"
   local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/snapshot-$ts.md"
   clear
   echo "Gathering snapshot (arp-scan + nmap ping sweep)… a few seconds."
-  local arp nmap_sn bt
+  local arp nmap_sn bt snmp_section
   arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
   nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
   bt="$(bt_neighbourhood)"
+  snmp_section="$(snmp_report_block "$snmp_h" "$snmp_c")"
 
   cat > "$f" <<RPT
 # Network Site Snapshot
@@ -1630,6 +1632,8 @@ $nmap_sn
 $(sudo lldpcli show neighbors 2>/dev/null || echo 'no LLDP neighbour seen')
 \`\`\`
 
+$snmp_section
+
 ## Bluetooth neighbourhood
 \`\`\`
 $bt
@@ -1647,9 +1651,10 @@ RPT
 
 gen_sweep() {
   need_iface || return
+  local snmp_h="${1:-}" snmp_c="${2:-public}"
   local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/sweep-$ts.md"
   clear; echo "Running full sweep — this can take a minute…"
-  local arp nmap_sn lldp dhcp wan hosts logo bt
+  local arp nmap_sn lldp dhcp wan hosts logo bt snmp_section
   arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
   nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
   hosts="$(printf '%s\n' "$nmap_sn" | grep -c 'Nmap scan report')"
@@ -1658,6 +1663,7 @@ gen_sweep() {
   if have librespeed-cli; then wan="$(librespeed-cli --no-icmp 2>/dev/null || echo 'WAN test failed')"
   else wan='librespeed-cli not installed'; fi
   bt="$(bt_neighbourhood)"
+  snmp_section="$(snmp_report_block "$snmp_h" "$snmp_c")"
   logo=""
   [ -n "${SITE_LOGO:-}" ] && [ -f "$SITE_LOGO" ] && logo="![logo]($SITE_LOGO)"
 
@@ -1704,6 +1710,8 @@ $nmap_sn
 \`\`\`
 $lldp
 \`\`\`
+
+$snmp_section
 
 ## WAN throughput
 \`\`\`
