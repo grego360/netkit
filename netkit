@@ -1167,6 +1167,26 @@ m_system() {
   esac
 }
 
+# ---------- Building / OT protocols ----------
+# ICS/OT fingerprint sweep: one nmap pass over the common OT ports. All four NSE
+# scripts ship with Debian's nmap. Mixed T:/U: port list + -sU -sT is one scan.
+ot_sweep() {
+  need_iface || return
+  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+  page sudo nmap -sU -sT -p T:102,502,44818,U:47808 \
+    --script s7-info,modbus-discover,enip-info,bacnet-info --host-timeout 30s "$n"
+}
+
+m_ot() {
+  local k; k="$(menu "🏭 Building / OT" \
+    "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
+    "back|‹ back")"
+  case "$k" in
+    sweep) ot_sweep ;;
+    *) return ;;
+  esac
+}
+
 # ---------- report generators ----------
 gen_report() {
   need_iface || return
@@ -1652,6 +1672,7 @@ while true; do
     "avoip|🎚 AV-over-IP (multicast / PTP)" \
     "iot|🏠 Smart Home / IoT" \
     "rf|📶 Bluetooth / RF" \
+    "ot|🏭 Building / OT" \
     "report|📊 Reporting" \
     "system|⚙️ System / Network info" \
     "site|🏷 Site profile" \
@@ -1669,6 +1690,7 @@ while true; do
     avoip) m_avoip ;;
     iot) m_iot ;;
     rf) m_rf ;;
+    ot) m_ot ;;
     report) m_report ;;
     system) m_system ;;
     site) m_site ;;
