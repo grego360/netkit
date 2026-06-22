@@ -403,6 +403,39 @@ devctl_valid_hex() {
   [ $(( ${#h} % 2 )) -eq 0 ]
 }
 
+# load_device name -> rc 0 and populate DEV_* + DEV_CMD_* arrays; rc 1 if no file.
+# Whitelist line parser — the .conf is NEVER sourced (security boundary, like load_site).
+load_device() {
+  DEV_TRANSPORT=""; DEV_DEV=""; DEV_BAUD=""; DEV_FRAMING=""
+  DEV_HOST=""; DEV_PORT=""; DEV_READ_TIMEOUT=""; DEV_EOL=""; DEV_FORMAT=""
+  DEV_CMD_LABEL=(); DEV_CMD_FMT=(); DEV_CMD_PAYLOAD=(); DEV_CMD_EOL=()
+  local cf="$device_dir/$1.conf"
+  [ -f "$cf" ] || return 1
+  local line key val l f p e
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
+    case "$key" in
+      TRANSPORT) DEV_TRANSPORT="$val" ;;
+      DEV) DEV_DEV="$val" ;;
+      BAUD) DEV_BAUD="$val" ;;
+      FRAMING) DEV_FRAMING="$val" ;;
+      HOST) DEV_HOST="$val" ;;
+      PORT) DEV_PORT="$val" ;;
+      READ_TIMEOUT) DEV_READ_TIMEOUT="$val" ;;
+      EOL) DEV_EOL="$val" ;;
+      FORMAT) DEV_FORMAT="$val" ;;
+      CMD) IFS='|' read -r l f p e <<< "$val"
+           DEV_CMD_LABEL+=("$l"); DEV_CMD_FMT+=("$f")
+           DEV_CMD_PAYLOAD+=("$p"); DEV_CMD_EOL+=("$e") ;;
+      *) : ;;
+    esac
+  done < "$cf"
+}
+
+device_list() { find "$device_dir" -maxdepth 1 -name '*.conf' -printf '%f\n' 2>/dev/null | sed 's/\.conf$//'; }
+device_show_file() { cat "$device_dir/$1.conf" 2>/dev/null; }
+
 # ---------- categories ----------
 m_discovery() {
   local k; k="$(menu "🔍 Discovery" \
