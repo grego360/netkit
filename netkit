@@ -1179,10 +1179,82 @@ ot_sweep() {
 
 m_ot() {
   local k; k="$(menu "🏭 Building / OT" \
+    "modbus|Modbus (scan / read / write)" \
     "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
     "back|‹ back")"
   case "$k" in
+    modbus) m_modbus ;;
     sweep) ot_sweep ;;
+    *) return ;;
+  esac
+}
+
+# Modbus connection prompt -> fills G_MB_OPTS (mbpoll option args) + G_MB_TARGET
+# (positional host or serial device, which mbpoll wants LAST). rc1 on cancel.
+G_MB_OPTS=(); G_MB_TARGET=""
+modbus_conn() {
+  G_MB_OPTS=(); G_MB_TARGET=""
+  local tr; tr="$(menu "Transport" "tcp|Modbus TCP" "rtu|Modbus RTU (serial)")"
+  [ -z "$tr" ] && return 1
+  if [ "$tr" = tcp ]; then
+    local host port
+    host="$(ask_ip "Device IP:" "$GW")" || return 1
+    port="$(ask_num "TCP port:" "502")" || return 1
+    G_MB_OPTS=(-m tcp -p "$port"); G_MB_TARGET="$host"
+  else
+    local dev baud parity
+    dev="$(ask "Serial device:" "/dev/ttyUSB0")"
+    [ -e "$dev" ] || { clear; echo "No such device: $dev"; pause; return 1; }
+    baud="$(ask_num "Baud:" "9600")" || return 1
+    # mbpoll RTU parity DEFAULTS to even — default to none (8N1) which most gear uses.
+    parity="$(menu "Parity" "none|None (8N1)" "even|Even (8E1)" "odd|Odd (8O1)")"
+    [ -z "$parity" ] && parity=none
+    G_MB_OPTS=(-m rtu -b "$baud" -P "$parity"); G_MB_TARGET="$dev"
+  fi
+  return 0
+}
+
+# modbus_rw read|write — ad-hoc poll/write. Always -1 (one-shot) so output is finite.
+modbus_rw() {
+  local mode="$1"
+  modbus_conn || return
+  local slave rtype addr base
+  slave="$(ask_num "Slave/unit ID:" "1")" || return
+  if [ "$mode" = read ]; then
+    rtype="$(menu "Register type" \
+      "0|Coil (RW)" "1|Discrete input (RO)" "3|Input register (RO)" "4|Holding register (RW)")"
+  else
+    rtype="$(menu "Register type" "0|Coil (RW)" "4|Holding register (RW)")"
+  fi
+  [ -z "$rtype" ] && return
+  addr="$(ask_num "${mode^} address:" "1")" || return
+  base="$(menu "Address base" "1|1-based (40001-style, default)" "0|0-based (raw PDU)")"
+  [ "$base" = 0 ] && G_MB_OPTS+=(-0)
+  if [ "$mode" = read ]; then
+    local count; count="$(ask_num "Count:" "1")" || return
+    page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -c "$count" -1 "$G_MB_TARGET"
+  else
+    local value a; value="$(ask_req "Value to write:" "")" || return
+    a="$(ask "Write '$value' to $G_MB_TARGET (slave $slave, t$rtype @$addr)? (y/N):" "N")"
+    case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+    # '--' guards a negative value from being parsed as an option.
+    page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -1 "$G_MB_TARGET" -- "$value"
+  fi
+}
+
+m_modbus() {
+  require mbpoll "mbpoll" || return
+  local k; k="$(menu "🔧 Modbus" \
+    "scan|Scan for Modbus devices (nmap, TCP 502)" \
+    "read|Read registers" \
+    "write|Write a register" \
+    "back|‹ back")"
+  case "$k" in
+    scan) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+          page sudo nmap -p502 --open --script modbus-discover \
+            --script-args modbus-discover.aggressive=true "$n" ;;
+    read) modbus_rw read ;;
+    write) modbus_rw write ;;
     *) return ;;
   esac
 }
