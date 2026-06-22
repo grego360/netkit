@@ -1041,14 +1041,17 @@ snmp_if_table() {
   {
     "${SW[@]}" 1.3.6.1.2.1.2.2.1.2; echo "---S---"
     "${SW[@]}" 1.3.6.1.2.1.2.2.1.8; echo "---S---"
-    "${SW[@]}" 1.3.6.1.2.1.2.2.1.5
+    "${SW[@]}" 1.3.6.1.2.1.2.2.1.5; echo "---S---"
+    "${SW[@]}" 1.3.6.1.2.1.31.1.1.1.15
   } | awk '
     /---S---/ { sect++; next }
     { idx=$1; sub(/.*\./,"",idx); v=$2; for(i=3;i<=NF;i++) v=v" "$i
-      if(sect==0) name[idx]=v; else if(sect==1) oper[idx]=v; else spd[idx]=v; seen[idx]=1 }
+      if(sect==0) name[idx]=v; else if(sect==1) oper[idx]=v; else if(sect==2) spd[idx]=v; else hspd[idx]=v; seen[idx]=1 }
     END{ for(i in seen){
       s=oper[i]+0; st=(s==1?"up":s==2?"down":s==3?"testing":s==7?"lowerdn":"?")
-      sp=spd[i]+0; if(sp>=1e9) hs=sprintf("%gG",sp/1e9); else if(sp>=1e6) hs=sprintf("%gM",sp/1e6); else hs=sp
+      sp=spd[i]+0; hsp=hspd[i]+0
+      if(sp>=4294967295 || sp==0){ if(hsp>0) sp=hsp*1e6 }
+      if(sp>=1e9) hs=sprintf("%gG",sp/1e9); else if(sp>=1e6) hs=sprintf("%gM",sp/1e6); else hs=sp
       printf "%-6s %-26s %-8s %s\n", i, name[i], st, hs } }' | sort -n
 }
 
@@ -1057,7 +1060,7 @@ snmp_poe() {
   local -a SW=(snmpwalk "${G_SNMP_ARGS[@]}" -Oqn "$h")
   echo "== Main PSE (watts — vendor scaling may vary) =="
   printf 'budget (pethMainPsePower):        '; "${SW[@]}" 1.3.6.1.2.1.105.1.3.1.1.2 2>/dev/null | awk '{print $2}' | paste -sd' ' -
-  printf 'consumed (pethMainPseConsumption): '; "${SW[@]}" 1.3.6.1.2.1.105.1.3.1.1.4 2>/dev/null | awk '{print $2}' | paste -sd' ' -
+  printf 'consumed (pethMainPseConsumptionPower): '; "${SW[@]}" 1.3.6.1.2.1.105.1.3.1.1.4 2>/dev/null | awk '{print $2}' | paste -sd' ' -
   echo
   echo "== Per-port detection status =="
   local out
