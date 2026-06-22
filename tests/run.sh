@@ -95,6 +95,7 @@ test_load_device() {
   rm -rf "$d"
 }
 
+# shellcheck disable=SC2329,SC2034  # snmpwalk stub + G_SNMP_ARGS are used indirectly by the sourced snmp_if_table
 test_snmp_if_table() {
   G_SNMP_ARGS=(-v2c -c public -t 2 -r 1)
   snmpwalk() {                       # synthetic rows keyed by trailing OID arg
@@ -113,14 +114,15 @@ test_snmp_if_table() {
   assert_contains "$out" "1G"         "if_table formats a normal 1G link"
 }
 
+# shellcheck disable=SC2329  # have/snmpget/snmpwalk stubs are invoked indirectly by the sourced snmp_report_block
 test_snmp_report_block() {
   have()     { return 0; }
   snmpget()  { return 0; }
   snmpwalk() { echo "x"; }
   assert_empty "$(snmp_report_block '')" "report_block: empty host -> no section"
-  ( have() { return 1; }; snmp_report_block 1.2.3.4 public ) | grep -q 'not installed' \
-    && printf '  ok: %s\n' "report_block: missing snmpwalk -> not-installed note" \
-    || { printf '  FAIL: %s\n' "report_block not-installed note"; echo x >>"$fails"; }
+  local out_ni
+  out_ni="$( have() { return 1; }; snmp_report_block 1.2.3.4 public )"
+  assert_contains "$out_ni" "not installed" "report_block: missing snmpwalk -> not-installed note"
   assert_contains "$(snmp_report_block 1.2.3.4 public)" "## Switch 1.2.3.4 (SNMP v2c)" "report_block renders section header"
 }
 
