@@ -18,9 +18,23 @@ assert_rc()       { if [ "$1" = "$2" ]; then printf '  ok: %s\n' "$3"; else prin
 # run_test, NOT run — netkit defines its own run() helper, which we just sourced.
 run_test() { printf '== %s ==\n' "$1"; ( "$1" ); }
 
-test_smoke() { assert_eq "8" "8" "harness sanity"; }
+test_framing_socat() {
+  assert_eq "cs8,parenb=0,cstopb=0"         "$(framing_socat 8N1)" "socat 8N1"
+  assert_eq "cs8,parenb=1,parodd=0,cstopb=0" "$(framing_socat 8E1)" "socat 8E1"
+  assert_eq "cs7,parenb=1,parodd=1,cstopb=0" "$(framing_socat 7O1)" "socat 7O1"
+  assert_eq "cs8,parenb=0,cstopb=1"         "$(framing_socat 8N2)" "socat 8N2 (2 stop bits)"
+  framing_socat 9N1 >/dev/null 2>&1; assert_rc 1 "$?" "socat rejects bad framing 9N1"
+}
 
-run_test test_smoke
+test_framing_tio() {
+  assert_eq "-d 8 -p none -s 1" "$(framing_tio 8N1)" "tio 8N1"
+  assert_eq "-d 8 -p even -s 1" "$(framing_tio 8E1)" "tio 8E1"
+  assert_eq "-d 7 -p odd -s 1"  "$(framing_tio 7O1)" "tio 7O1"
+  framing_tio 9N1 >/dev/null 2>&1; assert_rc 1 "$?" "tio rejects bad framing 9N1"
+}
+
+run_test test_framing_socat
+run_test test_framing_tio
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
