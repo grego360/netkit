@@ -1167,6 +1167,180 @@ m_system() {
   esac
 }
 
+# ---------- Building / OT protocols ----------
+# ICS/OT fingerprint sweep: one nmap pass over the common OT ports. All four NSE
+# scripts ship with Debian's nmap. Mixed T:/U: port list + -sU -sT is one scan.
+ot_sweep() {
+  need_iface || return
+  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+  page sudo nmap -sU -sT -p T:102,502,44818,U:47808 \
+    --script s7-info,modbus-discover,enip-info,bacnet-info --host-timeout 30s "$n"
+}
+
+m_ot() {
+  local k; k="$(menu "🏭 Building / OT" \
+    "modbus|Modbus (scan / read / write)" \
+    "bacnet|BACnet/IP (discover / read / write)" \
+    "knx|KNX (monitor / group read / write)" \
+    "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
+    "back|‹ back")"
+  case "$k" in
+    modbus) m_modbus ;;
+    bacnet) m_bacnet ;;
+    knx) m_knx ;;
+    sweep) ot_sweep ;;
+    *) return ;;
+  esac
+}
+
+# Modbus connection prompt -> fills G_MB_OPTS (mbpoll option args) + G_MB_TARGET
+# (positional host or serial device, which mbpoll wants LAST). rc1 on cancel.
+G_MB_OPTS=(); G_MB_TARGET=""
+modbus_conn() {
+  G_MB_OPTS=(); G_MB_TARGET=""
+  local tr; tr="$(menu "Transport" "tcp|Modbus TCP" "rtu|Modbus RTU (serial)")"
+  [ -z "$tr" ] && return 1
+  if [ "$tr" = tcp ]; then
+    local host port
+    host="$(ask_ip "Device IP:" "$GW")" || return 1
+    port="$(ask_num "TCP port:" "502")" || return 1
+    G_MB_OPTS=(-m tcp -p "$port"); G_MB_TARGET="$host"
+  else
+    local dev baud parity
+    dev="$(ask "Serial device:" "/dev/ttyUSB0")"
+    [ -e "$dev" ] || { clear; echo "No such device: $dev"; pause; return 1; }
+    baud="$(ask_num "Baud:" "9600")" || return 1
+    # mbpoll RTU parity DEFAULTS to even — default to none (8N1) which most gear uses.
+    parity="$(menu "Parity" "none|None (8N1)" "even|Even (8E1)" "odd|Odd (8O1)")"
+    [ -z "$parity" ] && parity=none
+    G_MB_OPTS=(-m rtu -b "$baud" -P "$parity"); G_MB_TARGET="$dev"
+  fi
+  return 0
+}
+
+# modbus_rw read|write — ad-hoc poll/write. Always -1 (one-shot) so output is finite.
+modbus_rw() {
+  local mode="$1"
+  modbus_conn || return
+  local slave rtype addr base
+  slave="$(ask_num "Slave/unit ID:" "1")" || return
+  if [ "$mode" = read ]; then
+    rtype="$(menu "Register type" \
+      "0|Coil (RW)" "1|Discrete input (RO)" "3|Input register (RO)" "4|Holding register (RW)")"
+  else
+    rtype="$(menu "Register type" "0|Coil (RW)" "4|Holding register (RW)")"
+  fi
+  [ -z "$rtype" ] && return
+  addr="$(ask_num "${mode^} address:" "1")" || return
+  base="$(menu "Address base" "1|1-based (40001-style, default)" "0|0-based (raw PDU)")"
+  [ "$base" = 0 ] && G_MB_OPTS+=(-0)
+  if [ "$mode" = read ]; then
+    local count; count="$(ask_num "Count:" "1")" || return
+    page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -c "$count" -1 "$G_MB_TARGET"
+  else
+    local value a; value="$(ask_req "Value to write:" "")" || return
+    a="$(ask "Write '$value' to $G_MB_TARGET (slave $slave, t$rtype @$addr)? (y/N):" "N")"
+    case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+    # '--' guards a negative value from being parsed as an option.
+    page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -1 "$G_MB_TARGET" -- "$value"
+  fi
+}
+
+m_modbus() {
+  require mbpoll "mbpoll" || return
+  local k; k="$(menu "🔧 Modbus" \
+    "scan|Scan for Modbus devices (nmap, TCP 502)" \
+    "read|Read registers" \
+    "write|Write a register" \
+    "back|‹ back")"
+  case "$k" in
+    scan) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+          page sudo nmap -p502 --open --script modbus-discover \
+            --script-args modbus-discover.aggressive=true "$n" ;;
+    read) modbus_rw read ;;
+    write) modbus_rw write ;;
+    *) return ;;
+  esac
+}
+
+bacnet_read() {
+  local tgt obj prop
+  tgt="$(ask_req "Device (IP or instance):" "")" || return
+  obj="$(ask_req "Object (e.g. ai:1 or analog-input,0):" "")" || return
+  prop="$(ask_req "Property (e.g. pv):" "pv")" || return
+  page bacnet -i "$SELFIP" read "$tgt" "$obj" "$prop"
+}
+
+bacnet_write() {
+  local tgt obj prop val pri a
+  tgt="$(ask_req "Device (IP or instance):" "")" || return
+  obj="$(ask_req "Object (e.g. av:1):" "")" || return
+  prop="$(ask_req "Property (e.g. pv):" "pv")" || return
+  val="$(ask_req "Value to write:" "")" || return
+  pri="$(ask_num "Priority (1-16):" "8")" || return
+  a="$(ask "Write '$val' to $tgt $obj $prop @prio $pri? (y/N):" "N")"
+  case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+  page bacnet -i "$SELFIP" write "$tgt" "$obj" "$prop" "$val" --priority "$pri"
+}
+
+# Discovery via nmap needs no setup; WhoIs/read/write need the rusty-bacnet binary.
+# Run discovery and read/write sequentially — both bind local UDP 47808.
+m_bacnet() {
+  need_iface || return
+  [ -n "$SELFIP" ] || { clear; echo "No local IPv4 address — BACnet needs a bound source address (check link/DHCP)."; pause; return; }
+  local k; k="$(menu "🏢 BACnet/IP ($IFACE)" \
+    "nmap|Discover devices (nmap, no setup needed)" \
+    "whois|Discover devices (WhoIs, rusty-bacnet)" \
+    "read|Read a property" \
+    "write|Write a property" \
+    "back|‹ back")"
+  case "$k" in
+    nmap) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+          page sudo nmap -sU -p47808 --open --script bacnet-info "$n" ;;
+    whois) require bacnet "bacnet (rusty-bacnet)" || return
+           local r; r="$(ask "Instance range (blank = all, e.g. 1-4000):" "")"
+           if [ -n "$r" ]; then page bacnet -i "$SELFIP" discover "$r"
+           else page bacnet -i "$SELFIP" discover; fi ;;
+    read) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_read ;;
+    write) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_write ;;
+    *) return ;;
+  esac
+}
+
+# knxtool talks KNXnet/IP directly from the URL — no running knxd daemon needed for
+# one-shot commands. ipt:<gw> = tunnelling to a specific interface (default);
+# ip: = multicast routing. vbusmonitor1 streams forever -> run (never page).
+m_knx() {
+  require knxtool "knxd-tools" || return
+  local mode url gw
+  mode="$(menu "Connection" \
+    "ipt|Tunnelling to a gateway (ipt:)" "ip|Routing / multicast (ip:)")"
+  [ -z "$mode" ] && return
+  if [ "$mode" = ipt ]; then
+    gw="$(ask_ip "KNXnet/IP gateway IP:" "$GW")" || return
+    url="ipt:$gw"
+  else
+    url="ip:"
+  fi
+  local k; k="$(menu "🏗 KNX ($url)" \
+    "mon|Bus monitor (live)" \
+    "read|Group read" \
+    "write|Group write" \
+    "back|‹ back")"
+  case "$k" in
+    mon) run knxtool vbusmonitor1 "$url" ;;
+    read) local ga; ga="$(ask_req "Group address (x/y/z):" "")" || return
+          page knxtool groupread "$url" "$ga" ;;
+    write) local ga val a
+           ga="$(ask_req "Group address (x/y/z):" "")" || return
+           val="$(ask_req "Value (decimal byte(s)):" "")" || return
+           a="$(ask "Write '$val' to $ga via $url? (y/N):" "N")"
+           case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+           page knxtool groupwrite "$url" "$ga" "$val" ;;
+    *) return ;;
+  esac
+}
+
 # ---------- report generators ----------
 gen_report() {
   need_iface || return
@@ -1309,15 +1483,16 @@ run_dash() {
 }
 
 # ---------- prebuilt-binary registry (shared by setup + doctor) ----------
-PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh)
+PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh jscott3201/rusty-bacnet)
 PREBUILT_RX=(
   'linux_arm64\.tar\.gz$'
   '(aarch64|arm64).*linux.*tar\.gz$|linux.*(musl|gnu).*(aarch64|arm64).*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
+  'bacnet-linux-arm64$'
 )
-PREBUILT_BIN=(librespeed-cli gping bandwhich xh)
-PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)')
+PREBUILT_BIN=(librespeed-cli gping bandwhich xh bacnet)
+PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)' 'bacnet (rusty-bacnet)')
 
 install_release_bin() { # repo  asset_regex  binname  friendly
   local repo="$1" rx="$2" bin="$3" friendly="${4:-$3}" url tmp found
@@ -1351,9 +1526,10 @@ do_setup() {
     echo "Run 'netkit setup' as your normal user (it calls sudo where needed)."; exit 1
   fi
   sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
-  say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail…)"
+  say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
-              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd)
+              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd
+              mbpoll knxd-tools)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"
@@ -1401,7 +1577,8 @@ do_selftest() {
   say "Optional extras"
   local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
                   ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
-                  omping ptp4l rdisc6 tio socat xxd)
+                  omping ptp4l rdisc6 tio socat xxd
+                  mbpoll knxtool bacnet)
   for x in "${extras[@]}"; do
     if have "$x"; then ok "$x"; else warn "$x missing (run: netkit setup)"; fi
   done
@@ -1578,6 +1755,7 @@ CATEGORIES
   DNS/HTTP     dig, PTR, HTTP headers, port check, SMTP
   LLDP/SNMP    switch neighbour, SNMP (ports, PoE, traffic) - v2c/v3
   DevCtrl      RS232/TCP/UDP send+read, live session, saved devices, PJLink
+  OT/Building  Modbus (mbpoll), BACnet (nmap+rusty-bacnet), KNX (knxtool), ICS sweep
   AV-over-IP   IGMP, multicast groups, omping, PTP
   IoT          MQTT, Wake-on-LAN
   BT/RF        Bluetooth, RTL-SDR (433/868), spectrum sweep
@@ -1648,6 +1826,7 @@ while true; do
     "avoip|🎚 AV-over-IP (multicast / PTP)" \
     "iot|🏠 Smart Home / IoT" \
     "rf|📶 Bluetooth / RF" \
+    "ot|🏭 Building / OT" \
     "report|📊 Reporting" \
     "system|⚙️ System / Network info" \
     "site|🏷 Site profile" \
@@ -1665,6 +1844,7 @@ while true; do
     avoip) m_avoip ;;
     iot) m_iot ;;
     rf) m_rf ;;
+    ot) m_ot ;;
     report) m_report ;;
     system) m_system ;;
     site) m_site ;;
