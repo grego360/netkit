@@ -60,7 +60,7 @@ snmp_report_block() {
     return 0
   fi
   G_SNMP_ARGS=(-v2c -c "$comm" -t 2 -r 1)
-  unset SNMPCONFPATH 2>/dev/null || true        # force v2c; ignore any leftover v3 conf
+  unset SNMPCONFPATH 2>/dev/null || true        # drop the v3 conf in NETKIT_CFG_DIR off the search path (the -v2c flag is what forces the version)
   if ! snmpget "${G_SNMP_ARGS[@]}" "$h" 1.3.6.1.2.1.1.5.0 >/dev/null 2>&1; then
     printf '## Switch %s (SNMP v2c)\n```\nno SNMP response (check IP / community / v2c enabled)\n```\n' "$h"
     return 0
@@ -77,6 +77,21 @@ snmp_report_block() {
 Reuses `snmp_if_table` and `snmp_poe` **verbatim** (both read `G_SNMP_ARGS` and
 print plain text suitable for fenced blocks). The reachability probe uses
 `snmpget` (ships with the same `snmp` apt package as `snmpwalk`).
+
+### Fix: `snmp_if_table` high-speed interfaces
+
+`snmp_if_table` walks `ifSpeed` (`1.3.6.1.2.1.2.2.1.5`), a 32-bit gauge that caps
+at `4294967295` (~4.29 Gbps), so 10G/25G/40G uplinks display the raw cap value.
+Walk a fourth column, `ifHighSpeed` (`1.3.6.1.2.1.31.1.1.1.15`, in Mbps), and use
+it when `ifSpeed` is at the cap or zero:
+
+- Add `… 1.3.6.1.2.1.31.1.1.1.15` as a fourth `---S---`-separated section.
+- In the awk: `else if(sect==2) spd[idx]=v; else hspd[idx]=v`.
+- In the `END` block, before formatting: `if(sp>=4294967295 || sp==0){ if(hsp>0) sp=hsp*1e6 }`.
+
+Old gear that doesn't implement `ifXEntry` returns nothing for the fourth walk →
+`hspd` empty → falls back to the existing `ifSpeed` value. This improves both the
+report and the interactive `m_snmp → ports` view (shared function).
 
 ### Generator changes
 
@@ -127,6 +142,8 @@ prompt" both produce an empty host → no section.
 - **Off-hardware (candidate for the unit-test track):** `snmp_report_block ""`
   must print nothing and return 0; `snmp_report_block "x" "y"` with `snmpwalk`
   stubbed-absent must print the "not installed" note.
+- **High-speed interfaces:** verify a 10G+ uplink reports its real speed via the
+  `ifHighSpeed` fallback (no longer `4294967295`).
 - **Honest caveat:** not run against a real switch. Bench on the Pi against live
   SNMP gear before a client site.
 
@@ -138,3 +155,19 @@ prompt" both produce an empty host → no section.
 - CLAUDE.md: note the new site field where site profiles are described.
 - Broader doc-drift cleanup (stale `runsh`, line counts, 4→5 matchers) stays in
   its own separate track.
+
+## Minor opportunistic cleanup
+
+While editing `snmp_poe`, correct its inline label `pethMainPseConsumption` →
+`pethMainPseConsumptionPower` (the real RFC 3621 object name; OID unchanged).
+Cosmetic only.
+
+## Senior-review sign-off
+
+Reviewed against current net-snmp docs + RFC 3621 (2026-06-22): verdict
+*correct with fixes*. All OIDs, the `-v2c -c -t -r -Oqn` flags, `snmpget`/
+`snmpwalk` presence in Bookworm's `snmp` package, the `set -u`/subshell-capture
+pattern, and the no-arg backward compatibility were verified correct. net-snmp
+confirmed as the only sensible apt-first SNMP CLI for this architecture. The
+review's three findings (v2c comment wording, the `ifHighSpeed` cap, the PoE
+label) are incorporated above.
