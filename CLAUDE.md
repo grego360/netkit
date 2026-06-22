@@ -21,7 +21,8 @@ holds prior iterations for reference only — don't edit them.
 
 ## Mandatory verification (every change)
 
-Both must produce **zero output** before delivering:
+The first two must produce **zero output**, and `bash tests/run.sh` must end in
+`0 failure(s)` (exit 0), before delivering:
 
 ```bash
 bash -n netkit                    # syntax check
