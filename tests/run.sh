@@ -33,8 +33,24 @@ test_framing_tio() {
   framing_tio 9N1 >/dev/null 2>&1; assert_rc 1 "$?" "tio rejects bad framing 9N1"
 }
 
+test_hex_norm() {
+  assert_eq "4142"  "$(hex_norm '0x41 0x42')" "hex_norm strips per-token 0x + spaces"
+  assert_eq "AABB"  "$(hex_norm '  AA BB ')"  "hex_norm strips surrounding/inner whitespace"
+  assert_eq "a0xb"  "$(hex_norm 'a0xb')"      "hex_norm leaves mid-token 0x intact (anchored)"
+}
+
+test_devctl_valid_hex() {
+  devctl_valid_hex "4142";       assert_rc 0 "$?" "valid even-length hex"
+  devctl_valid_hex "0x41 0x42";  assert_rc 0 "$?" "valid hex with 0x + spaces"
+  devctl_valid_hex "414";        assert_rc 1 "$?" "reject odd-length hex"
+  devctl_valid_hex "zz";         assert_rc 1 "$?" "reject non-hex garbage"
+  devctl_valid_hex "";           assert_rc 1 "$?" "reject empty"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
+run_test test_hex_norm
+run_test test_devctl_valid_hex
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
