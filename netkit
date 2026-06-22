@@ -485,7 +485,8 @@ devctl_live() {
   case "$1" in
     serial) require tio tio || return
             [ -e "$2" ] || { clear; echo "No such device: $2"; pause; return; }
-            local ta; read -ra ta <<< "$(framing_tio "$4")"
+            local fargs; fargs="$(framing_tio "$4")" || { clear; echo "Bad framing: $4"; pause; return; }
+            local ta; read -ra ta <<< "$fargs"
             run tio -b "$3" "${ta[@]}" -f none "$2" ;;   # device LAST per tio synopsis
     tcp)    require ncat ncat || return; run ncat "$2" "$3" ;;
     udp)    require ncat ncat || return; run ncat -u "$2" "$3" ;;
@@ -819,7 +820,12 @@ m_packet() {
     ts) local f; f="$(ask "Capture filter (blank = all):" "")"
         if [ -n "$f" ]; then run termshark -i "$IFACE" -f "$f"; else run termshark -i "$IFACE"; fi ;;
     td) local f; f="$(ask "Filter (e.g. 'port 53'):" "")"
-        runsh "sudo tcpdump -i $IFACE -n $f" ;;
+        # Pass the filter as a SINGLE argument (never via bash -c) so shell
+        # metacharacters in it cannot execute. tcpdump takes the whole filter
+        # expression as one arg.
+        local tdargs=(sudo tcpdump -i "$IFACE" -n)
+        [ -n "$f" ] && tdargs+=("$f")
+        run "${tdargs[@]}" ;;
     iftop) run sudo iftop -i "$IFACE" ;;
     bw) require bandwhich bandwhich || return; run sudo bandwhich ;;
     *) return ;;
@@ -1087,16 +1093,20 @@ m_rf() {
     btmon) require btmon bluez || return; run sudo btmon ;;
     sub) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
          local fr; fr="$(ask_req "Frequency:" "433.92M")" || return
-         runsh "rtl_433 -f $fr" ;;
+         run rtl_433 -f "$fr" ;;
     mqtt) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
           local fr br; br="$(ask_req "MQTT broker IP:" "${SITE_MQTT:-$GW}")" || return
           fr="$(ask_req "Frequency:" "433.92M")" || return
-          runsh "rtl_433 -f $fr -F mqtt://$br:1883" ;;
+          run rtl_433 -f "$fr" -F "mqtt://$br:1883" ;;
     sweep) require rtl_power "rtl-sdr + RTL-SDR dongle" || return
            local lo hi out; lo="$(ask_req "Start freq:" "433M")" || return
            hi="$(ask_req "End freq:" "435M")" || return
            out="$(report_dir)/sweep-$(date +%Y%m%d-%H%M).csv"
-           runsh "rtl_power -f ${lo}:${hi}:1k -g 25 -i 1 -1 '$out' && echo \"Wrote $out\"" ;;
+           # Quoted args, no bash -c: freq/path metacharacters cannot execute.
+           clear; echo "\$ rtl_power -f ${lo}:${hi}:1k -g 25 -i 1 -1 $out"
+           echo "------------------------------------------"
+           rtl_power -f "${lo}:${hi}:1k" -g 25 -i 1 -1 "$out" && echo "Wrote $out"
+           pause ;;
     sdrtest) require rtl_test rtl-sdr || return; run rtl_test -t ;;
     *) return ;;
   esac
@@ -1233,6 +1243,7 @@ modbus_rw() {
   [ -z "$rtype" ] && return
   addr="$(ask_num "${mode^} address:" "1")" || return
   base="$(menu "Address base" "1|1-based (40001-style, default)" "0|0-based (raw PDU)")"
+  [ -z "$base" ] && return   # Esc aborts — never silently default the base on a write
   [ "$base" = 0 ] && G_MB_OPTS+=(-0)
   if [ "$mode" = read ]; then
     local count; count="$(ask_num "Count:" "1")" || return
@@ -1489,7 +1500,7 @@ PREBUILT_RX=(
   '(aarch64|arm64).*linux.*tar\.gz$|linux.*(musl|gnu).*(aarch64|arm64).*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
-  'bacnet-linux-arm64$'
+  'bacnet.*linux.*arm64$'
 )
 PREBUILT_BIN=(librespeed-cli gping bandwhich xh bacnet)
 PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)' 'bacnet (rusty-bacnet)')
