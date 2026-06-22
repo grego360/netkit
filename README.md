@@ -189,7 +189,7 @@ netkit help          usage
 | 🎚 AV-over-IP | IGMP querier watch, multicast group discovery, joined groups, omping flow test, PTP traffic watch, PTP offset monitor |
 | 🏠 Smart Home / IoT | MQTT sub/pub, Wake-on-LAN |
 | 📶 Bluetooth / RF | BLE/classic scan (live, **name + address + RSSI + type**, LE/classic filter), per-device drill-down, adapter info, btmon live trace **or capture to `.btsnoop`**, RTL-SDR 433/868 decode, sub-GHz→MQTT, spectrum sweep, RTL-SDR dongle presence test |
-| 📊 Reporting | site snapshot, full sweep, save last viewed output, vnstat, asciinema recording |
+| 📊 Reporting | site snapshot, full sweep, save last viewed output, vnstat, asciinema recording — snapshot/sweep include a **switch SNMP/PoE section** (v2c; from the site's `SNMP_TARGET` or an interactive prompt) |
 | ⚙️ System / Network info | interfaces, ethtool, ipcalc, routes, DNS status, tmux dashboard |
 | 🏷 Site profile | select / create / show / clear active site |
 | ❓ Help / keys | In-app cheat-sheet: navigation keys, category overview, where reports land |
@@ -228,8 +228,9 @@ re-typing them each visit.
 
 - Stored at `~/.config/netkit/sites/<name>.conf` as plain `key=value`.
 - Active site name in `~/.config/netkit/active-site`; loaded at every launch.
-- Fields: `SMTP`, `SMTP_PORT`, `SNMP_COMMUNITY`, `MQTT`, `SPEED_MIN`,
-  `DNS_DOMAIN`, `HTTP_URL`, `PEER`, `LOGO`.
+- Fields: `SMTP`, `SMTP_PORT`, `SNMP_COMMUNITY`, `SNMP_TARGET`, `MQTT`,
+  `SPEED_MIN`, `DNS_DOMAIN`, `HTTP_URL`, `PEER`, `LOGO`.
+  - `SNMP_TARGET` — switch IP queried (v2c) for the report's switch/PoE section.
 - The active site shows in the status bar and routes reports into
   `~/netkit-reports/<site>/<date>/`.
 - **Security:** the `.conf` is read by a whitelist `key=value` parser and is

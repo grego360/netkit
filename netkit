@@ -1855,7 +1855,7 @@ do_selftest() {
     if have "$t"; then ok "$t"; else warn "$t MISSING"; fi
   done
   say "Optional extras"
-  local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
+  local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk snmpget fping
                   ipcalc wakeonlan bluetoothctl btmgmt btmon rfkill rtl_433 rtl_power swaks
                   ptp4l rdisc6 tio socat xxd
                   mbpoll knxtool bacnet)
