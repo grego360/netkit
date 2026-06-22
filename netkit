@@ -513,7 +513,7 @@ device_add_cmd() { # name
   local name="$1" label fmt payload eol
   label="$(ask_req 'Command label:' '')" || return
   case "$label" in *'|'*) clear; echo "Label cannot contain '|'."; pause; return ;; esac
-  fmt="$(menu 'Format' 'ascii|ASCII text' 'hex|Hex bytes')"; [ -z "$fmt" ] && return
+  fmt="$(menu 'Format' 'ascii|ASCII text' 'hex|Hex bytes')"; [ -z "$fmt" ] && fmt="${DEV_FORMAT:-ascii}"
   payload="$(ask_req 'Payload:' '')" || return
   case "$payload" in *'|'*) clear; echo "Payload cannot contain '|'."; pause; return ;; esac
   if [ "$fmt" = hex ] && ! devctl_valid_hex "$payload"; then
@@ -570,6 +570,111 @@ pjlink_probe() {
   clear
   printf 'PJLink probe — %s (TCP 4352)\n------------------------------------------\n%s' "$host" "$out"
   pause
+}
+
+devctl_send_adhoc() {
+  require socat socat || return
+  local tr; tr="$(menu 'Transport' 'serial|Serial' 'tcp|TCP' 'udp|UDP')"; [ -z "$tr" ] && return
+  local addr fmt payload eol to dev baud fr host port
+  if [ "$tr" = serial ]; then
+    dev="$(ask 'Serial device:' '/dev/ttyUSB0')"
+    [ -e "$dev" ] || { clear; echo "No such device: $dev"; pause; return; }
+    baud="$(ask_num 'Baud:' '9600')" || return
+    fr="$(ask 'Framing:' '8N1')"
+    addr="$(devctl_addr serial "$dev" "$baud" "$fr")" || { clear; echo "Bad framing: $fr"; pause; return; }
+  else
+    host="$(ask_ip 'Host:' "$GW")" || return
+    port="$(ask_num 'Port:' '4998')" || return
+    addr="$(devctl_addr "$tr" "$host" "$port")"
+  fi
+  fmt="$(menu 'Format' 'ascii|ASCII text' 'hex|Hex bytes')"; [ -z "$fmt" ] && return
+  payload="$(ask_req 'Command:' '')" || return
+  if [ "$fmt" = hex ] && ! devctl_valid_hex "$payload"; then clear; echo "Invalid hex."; pause; return; fi
+  eol="$(menu 'Line ending' 'cr|CR' 'lf|LF' 'crlf|CRLF' 'none|none')"; [ -z "$eol" ] && eol=none
+  to="$(ask_num 'Read timeout (s):' '2')" || return
+  devctl_send "$tr" "$addr" "$fmt" "$payload" "$eol" "$to"
+}
+
+devctl_live_adhoc() {
+  local tr; tr="$(menu 'Transport' 'serial|Serial' 'tcp|TCP' 'udp|UDP')"; [ -z "$tr" ] && return
+  local dev baud fr host port
+  if [ "$tr" = serial ]; then
+    dev="$(ask 'Serial device:' '/dev/ttyUSB0')"
+    [ -e "$dev" ] || { clear; echo "No such device: $dev"; pause; return; }
+    baud="$(ask_num 'Baud:' '9600')" || return
+    fr="$(ask 'Framing:' '8N1')"
+    devctl_live serial "$dev" "$baud" "$fr"
+  else
+    host="$(ask_ip 'Host:' "$GW")" || return
+    port="$(ask_num 'Port:' '4998')" || return
+    devctl_live "$tr" "$host" "$port"
+  fi
+}
+
+device_fire() { # name; DEV_* already loaded by caller
+  [ "${#DEV_CMD_LABEL[@]}" -gt 0 ] || { clear; echo "No commands yet — add one first."; pause; return; }
+  local pairs=() i; for i in "${!DEV_CMD_LABEL[@]}"; do pairs+=("$i|${DEV_CMD_LABEL[$i]}"); done
+  local sel; sel="$(menu 'Send which command?' "${pairs[@]}")"; [ -z "$sel" ] && return
+  local addr to="${DEV_READ_TIMEOUT:-2}"
+  if [ "$DEV_TRANSPORT" = serial ]; then
+    [ -e "$DEV_DEV" ] || { clear; echo "No such device: $DEV_DEV"; pause; return; }
+    addr="$(devctl_addr serial "$DEV_DEV" "$DEV_BAUD" "$DEV_FRAMING")" || { clear; echo "Bad framing."; pause; return; }
+  else
+    addr="$(devctl_addr "$DEV_TRANSPORT" "$DEV_HOST" "$DEV_PORT")"
+  fi
+  require socat socat || return
+  devctl_send "$DEV_TRANSPORT" "$addr" "${DEV_CMD_FMT[$sel]}" "${DEV_CMD_PAYLOAD[$sel]}" "${DEV_CMD_EOL[$sel]}" "$to"
+}
+
+device_actions() { # name
+  load_device "$1" || { clear; echo "Could not load device $1."; pause; return; }
+  while true; do
+    local k; k="$(menu "🎛 $1 (${DEV_TRANSPORT:-?})" \
+      "fire|Send a saved command" \
+      "live|Live interactive session" \
+      "add|Add a command" \
+      "del|Remove a command" \
+      "rm|Delete this device" \
+      "show|Show profile" \
+      "back|‹ back")"
+    case "$k" in
+      fire) device_fire "$1" ;;
+      live) if [ "$DEV_TRANSPORT" = serial ]; then devctl_live serial "$DEV_DEV" "$DEV_BAUD" "$DEV_FRAMING"
+            else devctl_live "$DEV_TRANSPORT" "$DEV_HOST" "$DEV_PORT"; fi ;;
+      add) device_add_cmd "$1"; load_device "$1" ;;
+      del) device_del_cmd "$1"; load_device "$1" ;;
+      rm) device_delete "$1"; return ;;
+      show) clear; device_show_file "$1"; pause ;;
+      *) return ;;
+    esac
+  done
+}
+
+device_pick() {
+  local names n pairs=()
+  names="$(device_list)"
+  [ -z "$names" ] && { clear; echo "No devices yet — use 'Create device profile'."; pause; return; }
+  while IFS= read -r n; do [ -n "$n" ] && pairs+=("$n|$n"); done <<< "$names"
+  local sel; sel="$(menu 'Select device' "${pairs[@]}")"; [ -z "$sel" ] && return
+  device_actions "$sel"
+}
+
+m_devctl() {
+  local k; k="$(menu '🎛 Device Control' \
+    "send|Quick send (ad-hoc) → read reply" \
+    "live|Live interactive session" \
+    "dev|Saved devices (recall & fire)" \
+    "newdev|Create device profile" \
+    "pjlink|PJLink projector probe (TCP 4352)" \
+    "back|‹ back")"
+  case "$k" in
+    send) devctl_send_adhoc ;;
+    live) devctl_live_adhoc ;;
+    dev) device_pick ;;
+    newdev) device_new ;;
+    pjlink) pjlink_probe ;;
+    *) return ;;
+  esac
 }
 
 # ---------- categories ----------
@@ -1452,6 +1557,7 @@ CATEGORIES
   Packet       termshark, tcpdump, iftop, bandwhich
   DNS/HTTP     dig, PTR, HTTP headers, port check, SMTP
   LLDP/SNMP    switch neighbour, SNMP (ports, PoE, traffic) - v2c/v3
+  DevCtrl      RS232/TCP/UDP send+read, live session, saved devices, PJLink
   AV-over-IP   IGMP, multicast groups, omping, PTP
   IoT          MQTT, Wake-on-LAN
   BT/RF        Bluetooth, RTL-SDR (433/868), spectrum sweep
@@ -1518,6 +1624,7 @@ while true; do
     "packet|🧰 Packet Inspection" \
     "dns|🌐 DNS / HTTP / Mail" \
     "lldp|🔌 Switch Port (LLDP / SNMP)" \
+    "devctl|🎛 Device Control (RS232 / IP)" \
     "avoip|🎚 AV-over-IP (multicast / PTP)" \
     "iot|🏠 Smart Home / IoT" \
     "rf|📶 Bluetooth / RF" \
@@ -1534,6 +1641,7 @@ while true; do
     packet) m_packet ;;
     dns) m_dns ;;
     lldp) m_lldp ;;
+    devctl) m_devctl ;;
     avoip) m_avoip ;;
     iot) m_iot ;;
     rf) m_rf ;;
