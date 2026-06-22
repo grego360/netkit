@@ -95,6 +95,35 @@ test_load_device() {
   rm -rf "$d"
 }
 
+test_snmp_if_table() {
+  G_SNMP_ARGS=(-v2c -c public -t 2 -r 1)
+  snmpwalk() {                       # synthetic rows keyed by trailing OID arg
+    # shellcheck disable=SC2124
+    local oid="${@: -1}"
+    case "$oid" in
+      1.3.6.1.2.1.2.2.1.2)     printf '%s\n%s\n' ".1.3.6.1.2.1.2.2.1.2.1 TenGigE0/1" ".1.3.6.1.2.1.2.2.1.2.2 GigE0/2" ;;
+      1.3.6.1.2.1.2.2.1.8)     printf '%s\n%s\n' ".1.3.6.1.2.1.2.2.1.8.1 1" ".1.3.6.1.2.1.2.2.1.8.2 1" ;;
+      1.3.6.1.2.1.2.2.1.5)     printf '%s\n%s\n' ".1.3.6.1.2.1.2.2.1.5.1 4294967295" ".1.3.6.1.2.1.2.2.1.5.2 1000000000" ;;
+      1.3.6.1.2.1.31.1.1.1.15) printf '%s\n%s\n' ".1.3.6.1.2.1.31.1.1.1.15.1 10000" ".1.3.6.1.2.1.31.1.1.1.15.2 1000" ;;
+    esac
+  }
+  local out; out="$(snmp_if_table 1.2.3.4)"
+  assert_contains "$out" "TenGigE0/1" "if_table lists interface name"
+  assert_contains "$out" "10G"        "if_table uses ifHighSpeed for capped 10G link"
+  assert_contains "$out" "1G"         "if_table formats a normal 1G link"
+}
+
+test_snmp_report_block() {
+  have()     { return 0; }
+  snmpget()  { return 0; }
+  snmpwalk() { echo "x"; }
+  assert_empty "$(snmp_report_block '')" "report_block: empty host -> no section"
+  ( have() { return 1; }; snmp_report_block 1.2.3.4 public ) | grep -q 'not installed' \
+    && printf '  ok: %s\n' "report_block: missing snmpwalk -> not-installed note" \
+    || { printf '  FAIL: %s\n' "report_block not-installed note"; echo x >>"$fails"; }
+  assert_contains "$(snmp_report_block 1.2.3.4 public)" "## Switch 1.2.3.4 (SNMP v2c)" "report_block renders section header"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -103,6 +132,8 @@ run_test test_devctl_emit
 run_test test_devctl_addr
 run_test test_load_site
 run_test test_load_device
+run_test test_snmp_if_table
+run_test test_snmp_report_block
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
