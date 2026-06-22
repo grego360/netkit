@@ -10,7 +10,7 @@ copying that one file to `/usr/local/bin/netkit` and marking it executable.
 The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 `netkit setup`.
 
-**Current version: 4.1.1**
+**Current version: 4.2.0**
 
 ---
 
@@ -183,6 +183,7 @@ netkit help          usage
 | 🧰 Packet Inspection | termshark, tcpdump, iftop, bandwhich |
 | 🌐 DNS / HTTP / Mail | dig, PTR, HTTP headers, port check, SMTP reachability (EHLO) + test send (swaks) |
 | 🔌 Switch Port (LLDP / SNMP) | LLDP neighbours; SNMP monitor (system, interface table, live bps, PoE budget, OID walk, subnet scan) — **v2c and v3** |
+| 🎛 Device Control | RS232/TCP/UDP send+read (ASCII or hex, selectable line ending), live interactive session (tio / ncat), per-device saved command library, PJLink projector probe (TCP 4352) |
 | 🎚 AV-over-IP | IGMP querier watch, multicast group discovery, joined groups, omping flow test, PTP traffic watch, PTP offset monitor |
 | 🏠 Smart Home / IoT | MQTT sub/pub, Wake-on-LAN |
 | 📶 Bluetooth / RF | BLE/classic scan, adapter info, btmon, RTL-SDR 433/868 decode, sub-GHz→MQTT, spectrum sweep, RTL-SDR dongle presence test |
@@ -199,10 +200,14 @@ Installed by `netkit setup`. apt-first; prebuilt binaries only where apt lacks a
 good aarch64 package.
 
 **apt (core extras):** `mosquitto-clients ethtool snmp fping ipcalc wakeonlan
-unzip bluez bluez-tools rtl-433 rtl-sdr swaks`
+unzip bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd`
 (plus base tools assumed present: nmap, arp-scan, avahi-utils, iperf3, mtr-tiny,
 lldpd, termshark/tshark/tcpdump/iftop, wavemon/iw/network-manager,
 dnsutils/curl/ncat/socat, vnstat/pandoc/asciinema, tmux/jq/git, gum + glow).
+
+`tio` (interactive serial terminal) and `xxd` (hex→bytes encode / binary reply
+display) back the **Device Control** category; `socat` and `ncat` (already present)
+drive its send+read and interactive IP sessions.
 
 **apt (best-effort — skipped cleanly if not in the repo):**
 `omping linuxptp ndisc6`
@@ -273,6 +278,10 @@ folder.
 - **SNMP v3** passphrases are stored plaintext in a mode-600 file under
   `~/.config/netkit` (kept off the command line / process list deliberately).
 - **RTL-SDR / PTP / omping** need their respective hardware or a peer device.
+- **Device Control** needs a USB-serial adapter for RS232; the user must be in the
+  `dialout` group (`netkit setup` adds you — re-login or run `newgrp dialout`). The
+  PJLink probe is v1 unauthenticated-only. Binary (hex) replies are shown via `xxd`;
+  ASCII replies are captured to reports like other paged output.
 - **`netkit autostart`** edits system config (systemd getty autologin +
   `~/.bash_profile`); it's gated behind a confirmation and fully reversible with
   `netkit autostart off`.
