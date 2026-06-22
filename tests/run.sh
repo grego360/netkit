@@ -83,7 +83,6 @@ test_load_site() {
 
 test_load_device() {
   local d; d="$(mktemp -d)"
-  # shellcheck disable=SC2034
   device_dir="$d/devices"; mkdir -p "$device_dir"
   printf 'TRANSPORT=tcp\nHOST=1.2.3.4\nPORT=502\nCMD=Power On|ascii|PWR1|cr\nCMD=Power Off|ascii|PWR0|cr\n' > "$device_dir/proj.conf"
   load_device proj
