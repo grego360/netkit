@@ -19,8 +19,9 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 - **`netkit` (the script) is the source of truth.** Read it for current
   behaviour, categories, and helpers before changing anything. This README is
   durable context, not a spec; if they disagree, the script wins.
-- **Every change must pass both** `bash -n netkit` **and** `shellcheck -s bash netkit`
-  **with zero output.** Verify before delivering and say it's been linted.
+- **Every change must pass** `bash -n netkit` **and** `shellcheck -s bash netkit`
+  **with zero output**, plus `bash tests/run.sh` **ending in `0 failure(s)` (exit 0)**.
+  Verify before delivering and say it's been linted and tested.
   Targeted `# shellcheck disable=SCxxxx` is allowed only for genuinely
   intentional cases, with a comment saying why.
 - **`set -uo pipefail`** (no `-e`). All new globals must be initialised so

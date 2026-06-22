@@ -35,6 +35,9 @@ else
   echo "  (shellcheck not installed locally — skipped; bash -n passed)"
 fi
 
+echo "▶ Running unit tests"
+( cd "$HERE" && bash tests/run.sh )
+
 echo "▶ Copying to $PI:/tmp/netkit"
 scp "$SRC" "$PI:/tmp/netkit"
 
