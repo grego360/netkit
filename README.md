@@ -10,7 +10,7 @@ copying that one file to `/usr/local/bin/netkit` and marking it executable.
 The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 `netkit setup`.
 
-**Current version: 4.2.0**
+**Current version: 4.2.1**
 
 ---
 
@@ -129,9 +129,11 @@ netkit doctor       # confirm the 4 GitHub binary matchers still resolve
 [`push-netkit.sh`](./push-netkit.sh):
 
 ```bash
-./push-netkit.sh                 # deploy to the default Pi (terminosa@10.1.20.176)
-./push-netkit.sh user@host       # or override the target
-NETKIT_PI=user@host ./push-netkit.sh
+./push-netkit.sh                 # deploy to the local Pi (terminosa@10.1.20.176)
+./push-netkit.sh remote          # deploy to the remote Pi (terminosa@pocket-term-rpi)
+./push-netkit.sh local           # local Pi, explicit
+./push-netkit.sh user@host       # or a literal target override
+NETKIT_PI=user@host ./push-netkit.sh   # override the default (no-arg) target
 ```
 
 It lints the script locally first (`bash -n`, plus `shellcheck` if installed), then
@@ -186,7 +188,7 @@ netkit help          usage
 | 🎛 Device Control | RS232/TCP/UDP send+read (ASCII or hex, selectable line ending), live interactive session (tio / ncat), per-device saved command library, PJLink projector probe (TCP 4352) |
 | 🎚 AV-over-IP | IGMP querier watch, multicast group discovery, joined groups, omping flow test, PTP traffic watch, PTP offset monitor |
 | 🏠 Smart Home / IoT | MQTT sub/pub, Wake-on-LAN |
-| 📶 Bluetooth / RF | BLE/classic scan, adapter info, btmon, RTL-SDR 433/868 decode, sub-GHz→MQTT, spectrum sweep, RTL-SDR dongle presence test |
+| 📶 Bluetooth / RF | BLE/classic scan (live, **name + address + RSSI + type**, LE/classic filter), per-device drill-down, adapter info, btmon live trace **or capture to `.btsnoop`**, RTL-SDR 433/868 decode, sub-GHz→MQTT, spectrum sweep, RTL-SDR dongle presence test |
 | 📊 Reporting | site snapshot, full sweep, save last viewed output, vnstat, asciinema recording |
 | ⚙️ System / Network info | interfaces, ethtool, ipcalc, routes, DNS status, tmux dashboard |
 | 🏷 Site profile | select / create / show / clear active site |

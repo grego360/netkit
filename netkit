@@ -12,11 +12,12 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.2.0"
+NETKIT_VERSION="4.2.1"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
 site_dir="$NETKIT_CFG_DIR/sites"
+bt_cache="$NETKIT_CFG_DIR/last-bt-scan"   # last Bluetooth scan (MAC|name|rssi|type lines)
 
 # ---------- helpers ----------
 have() { command -v "$1" >/dev/null 2>&1; }
@@ -24,11 +25,12 @@ have() { command -v "$1" >/dev/null 2>&1; }
 # ---------- colour ----------
 # Initialised unconditionally (set -u safe); populated only for a real colour
 # terminal. Honours NO_COLOR and a non-tty stdout (e.g. output redirected to a file).
-C_ACCENT="212"   # gum 256-colour code — gum styling only, unaffected by NO_COLOR
-C_HDR=""; C_OK=""; C_WARN=""; C_ERR=""; C_RST=""
+C_ACCENT="#21d329"   # theme accent (hex) — gum styling only, unaffected by NO_COLOR
+C_HDR=""; C_OK=""; C_WARN=""; C_ERR=""; C_RST=""; C_DIM=""
 if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
-  C_HDR=$'\033[1;35m'; C_OK=$'\033[1;32m'; C_WARN=$'\033[1;33m'
-  C_ERR=$'\033[1;31m'; C_RST=$'\033[0m'
+  # C_HDR mirrors C_ACCENT (#21d329) as a truecolor escape for non-gum output.
+  C_HDR=$'\033[1;38;2;33;211;41m'; C_OK=$'\033[1;32m'; C_WARN=$'\033[1;33m'
+  C_ERR=$'\033[1;31m'; C_RST=$'\033[0m'; C_DIM=$'\033[2m'
 fi
 
 # require <cmd> [hint]: 0 if present. If missing, offer to run setup now, then
@@ -52,32 +54,58 @@ banner() {
   if have gum; then
     gum style --border rounded --padding "0 2" \
       --border-foreground "$C_ACCENT" --foreground "$C_ACCENT" \
-      "netkit" "network toolkit"
+      "netkit  v${NETKIT_VERSION}" "network toolkit"
   else
-    echo "== netkit =="
+    echo "== netkit v${NETKIT_VERSION} =="
   fi
 }
 
 # menu "Header" "key|Label" ... -> prints the chosen key (empty if cancelled).
 # Plain arrow/scroll list (gum choose) — a search box (gum filter) is the wrong
 # widget here: scrolling injects stray input into the query and re-filters the list.
+# A pair whose key is "-" is a non-selectable SECTION HEADER: it's shown as a dim
+# divider; landing on it and pressing enter just re-prompts (gum choose has no
+# native disabled rows, so we bounce off it here).
+# Cursor/selection colour comes from gum's GUM_CHOOSE_* env vars rather than
+# --flags: an older gum silently ignores an unknown env var (graceful default
+# styling), whereas an unknown --flag is a hard error that would break the menu.
 menu() {
   local header="$1"; shift
   local labels=() keys=() pair
   for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
-  local chosen=""
+  local chosen="" i
   if have gum; then
-    chosen="$(printf '%s\n' "${labels[@]}" | gum choose --header "$header   (esc cancels)" --height 18)"
+    while :; do
+      chosen="$(printf '%s\n' "${labels[@]}" | \
+        GUM_CHOOSE_CURSOR="❯ " \
+        GUM_CHOOSE_CURSOR_FOREGROUND="$C_ACCENT" \
+        GUM_CHOOSE_SELECTED_FOREGROUND="$C_ACCENT" \
+        GUM_CHOOSE_HEADER_FOREGROUND="$C_ACCENT" \
+        gum choose --header "$header   (esc cancels)" --height 18)"
+      [ -z "$chosen" ] && { echo ""; return; }
+      for i in "${!labels[@]}"; do
+        if [ "${labels[$i]}" = "$chosen" ]; then
+          [ "${keys[$i]}" = "-" ] && { chosen=""; break; }   # header: re-prompt
+          echo "${keys[$i]}"; return
+        fi
+      done
+      [ -n "$chosen" ] && { echo ""; return; }               # no match: cancel
+    done
   else
-    local PS3="$header > " opt
-    select opt in "${labels[@]}"; do chosen="$opt"; break; done
+    # Plain-shell fallback: drop header rows from the numbered select list.
+    local PS3="$header > " opt sel_labels=() sel_keys=()
+    for i in "${!labels[@]}"; do
+      [ "${keys[$i]}" = "-" ] && continue
+      sel_labels+=("${labels[$i]}"); sel_keys+=("${keys[$i]}")
+    done
+    select opt in "${sel_labels[@]}"; do
+      for i in "${!sel_labels[@]}"; do
+        [ "${sel_labels[$i]}" = "$opt" ] && { echo "${sel_keys[$i]}"; return; }
+      done
+      break
+    done
+    echo ""
   fi
-  [ -z "$chosen" ] && { echo ""; return; }
-  local i
-  for i in "${!labels[@]}"; do
-    [ "${labels[$i]}" = "$chosen" ] && { echo "${keys[$i]}"; return; }
-  done
-  echo ""
 }
 
 ask() { # prompt, default -> prints answer
@@ -274,19 +302,21 @@ site_select() {
 }
 
 m_site() {
-  local k; k="$(menu "🏷 Site — ${NETKIT_SITE:-none}" \
-    "select|Select active site" \
-    "new|Create new site profile" \
-    "show|Show active site" \
-    "clear|Clear active site" \
-    "back|‹ back")"
-  case "$k" in
-    select) site_select ;;
-    new) site_new ;;
-    show) clear; site_show; pause ;;
-    clear) rm -f "$NETKIT_CFG_DIR/active-site"; load_site; clear; echo "Cleared active site."; pause ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🏷 Site — ${NETKIT_SITE:-none}" \
+      "select|Select active site" \
+      "new|Create new site profile" \
+      "show|Show active site" \
+      "clear|Clear active site" \
+      "back|‹ back")"
+    case "$k" in
+      select) site_select ;;
+      new) site_new ;;
+      show) clear; site_show; pause ;;
+      clear) rm -f "$NETKIT_CFG_DIR/active-site"; load_site; clear; echo "Cleared active site."; pause ;;
+      *) return ;;
+    esac
+  done
 }
 
 # CLI: netkit site [new|show|<name>]
@@ -338,9 +368,9 @@ gw_dot() {
 status_line() {
   local dot s
   dot="$(gw_dot)"
-  s=" iface: ${IFACE:-?}  ip: ${SELFIP:-?}  gw: $dot ${GW:-?}  wifi: ${WIFACE:-none}"
-  [ -n "$NETKIT_SITE" ] && s="$s  site: $NETKIT_SITE"
-  local b; if b="$(battery_status)"; then s="$s  bat: ${b}%"; fi
+  s=" ${C_DIM}iface${C_RST} ${IFACE:-?}   ${C_DIM}ip${C_RST} ${SELFIP:-?}   ${C_DIM}gw${C_RST} $dot ${GW:-?}   ${C_DIM}wifi${C_RST} ${WIFACE:-none}"
+  [ -n "$NETKIT_SITE" ] && s="$s   ${C_DIM}site${C_RST} $NETKIT_SITE"
+  local b; if b="$(battery_status)"; then s="$s   ${C_DIM}bat${C_RST} ${b}%"; fi
   printf '%s\n' "$s"
 }
 
@@ -660,7 +690,7 @@ device_actions() { # name
             else devctl_live "$DEV_TRANSPORT" "$DEV_HOST" "$DEV_PORT"; fi ;;
       add) device_add_cmd "$1"; load_device "$1" ;;
       del) device_del_cmd "$1"; load_device "$1" ;;
-      rm) device_delete "$1"; return ;;
+      rm) device_delete "$1"; [ -f "$device_dir/$1.conf" ] || return ;;  # only leave if actually deleted
       show) clear; device_show_file "$1"; pause ;;
       *) return ;;
     esac
@@ -668,59 +698,65 @@ device_actions() { # name
 }
 
 device_pick() {
-  local names n pairs=()
-  names="$(device_list)"
-  [ -z "$names" ] && { clear; echo "No devices yet — use 'Create device profile'."; pause; return; }
-  while IFS= read -r n; do [ -n "$n" ] && pairs+=("$n|$n"); done <<< "$names"
-  local sel; sel="$(menu 'Select device' "${pairs[@]}")"; [ -z "$sel" ] && return
-  device_actions "$sel"
+  while true; do
+    local names n pairs=()
+    names="$(device_list)"
+    [ -z "$names" ] && { clear; echo "No devices yet — use 'Create device profile'."; pause; return; }
+    while IFS= read -r n; do [ -n "$n" ] && pairs+=("$n|$n"); done <<< "$names"
+    local sel; sel="$(menu 'Select device' "${pairs[@]}")"; [ -z "$sel" ] && return
+    device_actions "$sel"
+  done
 }
 
 m_devctl() {
-  local k; k="$(menu '🎛 Device Control' \
-    "send|Quick send (ad-hoc) → read reply" \
-    "live|Live interactive session" \
-    "dev|Saved devices (recall & fire)" \
-    "newdev|Create device profile" \
-    "pjlink|PJLink projector probe (TCP 4352)" \
-    "back|‹ back")"
-  case "$k" in
-    send) devctl_send_adhoc ;;
-    live) devctl_live_adhoc ;;
-    dev) device_pick ;;
-    newdev) device_new ;;
-    pjlink) pjlink_probe ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu '🎛 Device Control' \
+      "send|Quick send (ad-hoc) → read reply" \
+      "live|Live interactive session" \
+      "dev|Saved devices (recall & fire)" \
+      "newdev|Create device profile" \
+      "pjlink|PJLink projector probe (TCP 4352)" \
+      "back|‹ back")"
+    case "$k" in
+      send) devctl_send_adhoc ;;
+      live) devctl_live_adhoc ;;
+      dev) device_pick ;;
+      newdev) device_new ;;
+      pjlink) pjlink_probe ;;
+      *) return ;;
+    esac
+  done
 }
 
 # ---------- categories ----------
 m_discovery() {
-  local k; k="$(menu "🔍 Discovery" \
-    "arp|ARP sweep (layer-2, fast)" \
-    "fp|fping sweep (which IPs answer)" \
-    "nsn|Nmap ping sweep (-sn)" \
-    "nsv|Nmap service scan (-sV)" \
-    "dhcp|DHCP servers (rogue check)" \
-    "mdns|mDNS / Bonjour browse (all)" \
-    "av|AV gear (Dante / NDI / AirPlay / Sonos)" \
-    "n6|IPv6 (neighbours / routers)" \
-    "back|‹ back")"
-  case "$k" in
-    arp) need_iface || return; run sudo arp-scan --interface="$IFACE" --localnet ;;
-    fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
-         require fping fping || return
-         # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
-         clear; printf '$ fping -a -g %s\n%s\n' "$n" "------------------------------------------"
-         fping -a -g "$n" 2>/dev/null; pause ;;
-    nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
-    nsv) local h; h="$(ask_req "Host:" "$GW")" || return; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
-    dhcp) need_iface || return; run sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
-    mdns) run avahi-browse -a -t -r ;;
-    av) run av_browse ;;
-    n6) m_ipv6 ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🔍 Discovery" \
+      "arp|ARP sweep (layer-2, fast)" \
+      "fp|fping sweep (which IPs answer)" \
+      "nsn|Nmap ping sweep (-sn)" \
+      "nsv|Nmap service scan (-sV)" \
+      "dhcp|DHCP servers (rogue check)" \
+      "mdns|mDNS / Bonjour browse (all)" \
+      "av|AV gear (Dante / NDI / AirPlay / Sonos)" \
+      "n6|IPv6 (neighbours / routers)" \
+      "back|‹ back")"
+    case "$k" in
+      arp) need_iface || continue; run sudo arp-scan --interface="$IFACE" --localnet ;;
+      fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
+           require fping fping || continue
+           # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
+           clear; printf '$ fping -a -g %s\n%s\n' "$n" "------------------------------------------"
+           fping -a -g "$n" 2>/dev/null; pause ;;
+      nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue; page sudo nmap -sn "$n" ;;
+      nsv) local h; h="$(ask_req "Host:" "$GW")" || continue; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
+      dhcp) need_iface || continue; run sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
+      mdns) run avahi-browse -a -t -r ;;
+      av) run av_browse ;;
+      n6) m_ipv6 ;;
+      *) return ;;
+    esac
+  done
 }
 
 av_browse() {
@@ -741,42 +777,46 @@ av_browse() {
 
 m_ipv6() {
   need_iface || return
-  local k; k="$(menu "🌐 IPv6 ($IFACE)" \
-    "nbr|Neighbour sweep (link-local all-nodes)" \
-    "rtr|Router discovery (rdisc6)" \
-    "lookup|Neighbour lookup (ndisc6 <addr>)" \
-    "back|‹ back")"
-  case "$k" in
-    nbr) # Quoted args, no bash -c: prime the neighbour cache, then show it.
-         clear; printf '$ ip -6 neigh show dev %s   (after multicast ping)\n%s\n' "$IFACE" "------------------------------------------"
-         ping -6 -c2 "ff02::1%$IFACE" >/dev/null 2>&1
-         ip -6 neigh show dev "$IFACE"; pause ;;
-    rtr) require rdisc6 ndisc6 || return; run rdisc6 "$IFACE" ;;
-    lookup) require ndisc6 ndisc6 || return
-            local a; a="$(ask_req "IPv6 address:" "")" || return; run ndisc6 "$a" "$IFACE" ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🌐 IPv6 ($IFACE)" \
+      "nbr|Neighbour sweep (link-local all-nodes)" \
+      "rtr|Router discovery (rdisc6)" \
+      "lookup|Neighbour lookup (ndisc6 <addr>)" \
+      "back|‹ back")"
+    case "$k" in
+      nbr) # Quoted args, no bash -c: prime the neighbour cache, then show it.
+           clear; printf '$ ip -6 neigh show dev %s   (after multicast ping)\n%s\n' "$IFACE" "------------------------------------------"
+           ping -6 -c2 "ff02::1%$IFACE" >/dev/null 2>&1
+           ip -6 neigh show dev "$IFACE"; pause ;;
+      rtr) require rdisc6 ndisc6 || continue; run rdisc6 "$IFACE" ;;
+      lookup) require ndisc6 ndisc6 || continue
+              local a; a="$(ask_req "IPv6 address:" "")" || continue; run ndisc6 "$a" "$IFACE" ;;
+      *) return ;;
+    esac
+  done
 }
 
 m_link() {
-  local k; k="$(menu "🔗 Link & Throughput" \
-    "isrv|iperf3 — run as SERVER (listen)" \
-    "icli|iperf3 — run as CLIENT (test to server)" \
-    "icli2|iperf3 client + PASS/FAIL (vs threshold)" \
-    "wan|WAN speed test (to the internet)" \
-    "mtr|mtr (latency + loss to host)" \
-    "ping|ping graph" \
-    "back|‹ back")"
-  case "$k" in
-    isrv) run iperf3 -s ;;
-    icli) local s; s="$(ask_req "Server IP:" "$GW")" || return; run iperf3 -c "$s" ;;
-    icli2) iperf_passfail ;;
-    wan)  require librespeed-cli librespeed-cli || return; run librespeed-cli --no-icmp ;;
-    mtr) local h; h="$(ask_req "Host:" "1.1.1.1")" || return; run mtr "$h" ;;
-    ping) local h; h="$(ask_req "Host:" "$GW")" || return
-          if have gping; then run gping "$h"; else run ping "$h"; fi ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🔗 Link & Throughput" \
+      "isrv|iperf3 — run as SERVER (listen)" \
+      "icli|iperf3 — run as CLIENT (test to server)" \
+      "icli2|iperf3 client + PASS/FAIL (vs threshold)" \
+      "wan|WAN speed test (to the internet)" \
+      "mtr|mtr (latency + loss to host)" \
+      "ping|ping graph" \
+      "back|‹ back")"
+    case "$k" in
+      isrv) run iperf3 -s ;;
+      icli) local s; s="$(ask_req "Server IP:" "$GW")" || continue; run iperf3 -c "$s" ;;
+      icli2) iperf_passfail ;;
+      wan)  require librespeed-cli librespeed-cli || continue; run librespeed-cli --no-icmp ;;
+      mtr) local h; h="$(ask_req "Host:" "1.1.1.1")" || continue; run mtr "$h" ;;
+      ping) local h; h="$(ask_req "Host:" "$GW")" || continue
+            if have gping; then run gping "$h"; else run ping "$h"; fi ;;
+      *) return ;;
+    esac
+  done
 }
 
 iperf_passfail() {
@@ -803,66 +843,72 @@ m_wifi() {
   if [ -z "$WIFACE" ]; then
     clear; echo "No wireless interface found on this unit."; pause; return
   fi
-  local k; k="$(menu "📡 WiFi ($WIFACE)" \
-    "wm|wavemon (live signal/noise)" \
-    "nm|Scan nearby APs (nmcli)" \
-    "iw|Scan nearby APs (iw)" \
-    "back|‹ back")"
-  case "$k" in
-    wm) run wavemon -i "$WIFACE" ;;
-    nm) run nmcli -f IN-USE,SSID,CHAN,SIGNAL,SECURITY device wifi list ;;
-    iw) run sudo iw dev "$WIFACE" scan ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "📡 WiFi ($WIFACE)" \
+      "wm|wavemon (live signal/noise)" \
+      "nm|Scan nearby APs (nmcli)" \
+      "iw|Scan nearby APs (iw)" \
+      "back|‹ back")"
+    case "$k" in
+      wm) run wavemon -i "$WIFACE" ;;
+      nm) run nmcli -f IN-USE,SSID,CHAN,SIGNAL,SECURITY device wifi list ;;
+      iw) run sudo iw dev "$WIFACE" scan ;;
+      *) return ;;
+    esac
+  done
 }
 
 m_packet() {
   need_iface || return
-  local k; k="$(menu "🧰 Packet Inspection ($IFACE)" \
-    "ts|termshark (TUI Wireshark, live)" \
-    "td|tcpdump (quick capture)" \
-    "iftop|iftop (per-connection bandwidth)" \
-    "bw|bandwhich (per-process bandwidth)" \
-    "back|‹ back")"
-  case "$k" in
-    ts) local f; f="$(ask "Capture filter (blank = all):" "")"
-        if [ -n "$f" ]; then run termshark -i "$IFACE" -f "$f"; else run termshark -i "$IFACE"; fi ;;
-    td) local f; f="$(ask "Filter (e.g. 'port 53'):" "")"
-        # Pass the filter as a SINGLE argument (never via bash -c) so shell
-        # metacharacters in it cannot execute. tcpdump takes the whole filter
-        # expression as one arg.
-        local tdargs=(sudo tcpdump -i "$IFACE" -n)
-        [ -n "$f" ] && tdargs+=("$f")
-        run "${tdargs[@]}" ;;
-    iftop) run sudo iftop -i "$IFACE" ;;
-    bw) require bandwhich bandwhich || return; run sudo bandwhich ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🧰 Packet Inspection ($IFACE)" \
+      "ts|termshark (TUI Wireshark, live)" \
+      "td|tcpdump (quick capture)" \
+      "iftop|iftop (per-connection bandwidth)" \
+      "bw|bandwhich (per-process bandwidth)" \
+      "back|‹ back")"
+    case "$k" in
+      ts) local f; f="$(ask "Capture filter (blank = all):" "")"
+          if [ -n "$f" ]; then run termshark -i "$IFACE" -f "$f"; else run termshark -i "$IFACE"; fi ;;
+      td) local f; f="$(ask "Filter (e.g. 'port 53'):" "")"
+          # Pass the filter as a SINGLE argument (never via bash -c) so shell
+          # metacharacters in it cannot execute. tcpdump takes the whole filter
+          # expression as one arg.
+          local tdargs=(sudo tcpdump -i "$IFACE" -n)
+          [ -n "$f" ] && tdargs+=("$f")
+          run "${tdargs[@]}" ;;
+      iftop) run sudo iftop -i "$IFACE" ;;
+      bw) require bandwhich bandwhich || continue; run sudo bandwhich ;;
+      *) return ;;
+    esac
+  done
 }
 
 m_dns() {
-  local k; k="$(menu "🌐 DNS / HTTP / Mail" \
-    "dig|dig (lookup a record)" \
-    "ptr|Reverse DNS (PTR)" \
-    "http|HTTP headers check" \
-    "port|Port open? (ncat)" \
-    "smtp|SMTP reachability + capabilities (EHLO)" \
-    "smtpsend|SMTP test send (device-alert check)" \
-    "back|‹ back")"
-  case "$k" in
-    dig) local d ty; d="$(ask_req "Domain:" "${SITE_DNS_DOMAIN:-modalav.co.uk}")" || return
-         ty="$(menu "Record type" "A|A" "AAAA|AAAA" "MX|MX" "TXT|TXT" "NS|NS" "CNAME|CNAME" "SOA|SOA")"
-         [ -z "$ty" ] && return
-         page dig +noall +answer "$d" "$ty" ;;
-    ptr) local ip; ip="$(ask_ip "IP:" "$GW")" || return; run dig -x "$ip" +short ;;
-    http) local u; u="$(ask_req "URL:" "${SITE_HTTP_URL:-https://modalav.co.uk}")" || return
-          if have xh; then run xh -I "$u"; else run curl -sSIL "$u"; fi ;;
-    port) local h p; h="$(ask_req "Host:" "$GW")" || return; p="$(ask_req "Port:" "443")" || return
-          run ncat -zv "$h" "$p" ;;
-    smtp) smtp_check ;;
-    smtpsend) smtp_send ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🌐 DNS / HTTP / Mail" \
+      "dig|dig (lookup a record)" \
+      "ptr|Reverse DNS (PTR)" \
+      "http|HTTP headers check" \
+      "port|Port open? (ncat)" \
+      "smtp|SMTP reachability + capabilities (EHLO)" \
+      "smtpsend|SMTP test send (device-alert check)" \
+      "back|‹ back")"
+    case "$k" in
+      dig) local d ty; d="$(ask_req "Domain:" "${SITE_DNS_DOMAIN:-modalav.co.uk}")" || continue
+           ty="$(menu "Record type" "A|A" "AAAA|AAAA" "MX|MX" "TXT|TXT" "NS|NS" "CNAME|CNAME" "SOA|SOA")"
+           [ -z "$ty" ] && continue
+           page dig +noall +answer "$d" "$ty" ;;
+      ptr) local ip; ip="$(ask_ip "IP:" "$GW")" || continue; run dig -x "$ip" +short ;;
+      http) local u; u="$(ask_req "URL:" "${SITE_HTTP_URL:-https://modalav.co.uk}")" || continue
+            if have xh; then run xh -I "$u"; else run curl -sSIL "$u"; fi ;;
+      port) local h p; h="$(ask_req "Host:" "$GW")" || continue; p="$(ask_req "Port:" "443")" || continue
+            run ncat -zv "$h" "$p" ;;
+      smtp) smtp_check ;;
+      smtpsend) smtp_send ;;
+      *) return ;;
+    esac
+  done
 }
 
 smtp_check() {
@@ -900,17 +946,19 @@ smtp_send() {
 }
 
 m_lldp() {
-  local k; k="$(menu "🔌 Switch Port (LLDP / SNMP)" \
-    "show|Show neighbours (which switch/port/VLAN)" \
-    "watch|Watch neighbours (live)" \
-    "snmp|Monitor a device via SNMP (ports, PoE, traffic…)" \
-    "back|‹ back")"
-  case "$k" in
-    show) page sudo lldpcli show neighbors ;;
-    watch) run sudo watch -n2 lldpcli show neighbors ;;
-    snmp) m_snmp ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🔌 Switch Port (LLDP / SNMP)" \
+      "show|Show neighbours (which switch/port/VLAN)" \
+      "watch|Watch neighbours (live)" \
+      "snmp|Monitor a device via SNMP (ports, PoE, traffic…)" \
+      "back|‹ back")"
+    case "$k" in
+      show) page sudo lldpcli show neighbors ;;
+      watch) run sudo watch -n2 lldpcli show neighbors ;;
+      snmp) m_snmp ;;
+      *) return ;;
+    esac
+  done
 }
 
 # ---------- SNMP device monitoring (v2c + v3) ----------
@@ -1032,130 +1080,258 @@ snmp_scan() {
 }
 
 m_iot() {
-  local k; k="$(menu "🏠 Smart Home / IoT" \
-    "sub|MQTT subscribe (watch a topic)" \
-    "pub|MQTT publish (send a test message)" \
-    "wol|Wake-on-LAN (send magic packet)" \
-    "back|‹ back")"
-  case "$k" in
-    sub) require mosquitto_sub mosquitto-clients || return
-         local h t; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || return
-         t="$(ask "Topic (blank = # = all):" "#")"; [ -z "$t" ] && t="#"
-         run mosquitto_sub -h "$h" -t "$t" -v ;;
-    pub) require mosquitto_pub mosquitto-clients || return
-         local h t m; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || return
-         t="$(ask_req "Topic:" "netkit/test")" || return
-         m="$(ask_req "Message:" "hello")" || return
-         run mosquitto_pub -h "$h" -t "$t" -m "$m" ;;
-    wol) require wakeonlan wakeonlan || return
-         local mac; mac="$(ask_req "Target MAC (aa:bb:cc:dd:ee:ff):" "")" || return
-         run wakeonlan "$mac" ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🏠 Smart Home / IoT" \
+      "sub|MQTT subscribe (watch a topic)" \
+      "pub|MQTT publish (send a test message)" \
+      "wol|Wake-on-LAN (send magic packet)" \
+      "back|‹ back")"
+    case "$k" in
+      sub) require mosquitto_sub mosquitto-clients || continue
+           local h t; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || continue
+           t="$(ask "Topic (blank = # = all):" "#")"; [ -z "$t" ] && t="#"
+           run mosquitto_sub -h "$h" -t "$t" -v ;;
+      pub) require mosquitto_pub mosquitto-clients || continue
+           local h t m; h="$(ask_req "Broker IP:" "${SITE_MQTT:-$GW}")" || continue
+           t="$(ask_req "Topic:" "netkit/test")" || continue
+           m="$(ask_req "Message:" "hello")" || continue
+           run mosquitto_pub -h "$h" -t "$t" -m "$m" ;;
+      wol) require wakeonlan wakeonlan || continue
+           local mac; mac="$(ask_req "Target MAC (aa:bb:cc:dd:ee:ff):" "")" || continue
+           run wakeonlan "$mac" ;;
+      *) return ;;
+    esac
+  done
 }
 
 m_avoip() {
   need_iface || return
-  local k; k="$(menu "🎚 AV-over-IP ($IFACE)" \
-    "igmp|IGMP querier + reports (passive watch)" \
-    "groups|Discover multicast groups (nmap)" \
-    "joined|Multicast groups joined on this host" \
-    "omping|Multicast flow test (needs 2nd device)" \
-    "ptpwatch|PTP traffic + grandmaster (passive)" \
-    "ptpmon|PTP offset monitor (runs ptp4l client)" \
-    "back|‹ back")"
-  case "$k" in
-    igmp) run sudo tcpdump -i "$IFACE" -n -v igmp ;;
-    groups) page sudo nmap --script broadcast-igmp-discovery -e "$IFACE" ;;
-    joined) run ip maddr show ;;
-    omping) if have omping; then
-              local self peer; self="$(ask_req "This device IP:" "${SELFIP:-}")" || return
-              peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || return
-              run omping "$self" "$peer"
-            else clear
-              echo "omping isn't installed — and it can't be auto-installed:"
-              echo "  • not in Debian/Raspberry Pi OS apt"
-              echo "  • ships only as source (no arm64 binary), and netkit never compiles on the Pi"
-              echo "To use this 2-device multicast test, build it yourself:"
-              echo "  github.com/troglobit/omping  (make && sudo make install)"
+  while true; do
+    local k; k="$(menu "🎚 AV-over-IP ($IFACE)" \
+      "igmp|IGMP querier + reports (passive watch)" \
+      "groups|Discover multicast groups (nmap)" \
+      "joined|Multicast groups joined on this host" \
+      "omping|Multicast flow test (needs 2nd device)" \
+      "ptpwatch|PTP traffic + grandmaster (passive)" \
+      "ptpmon|PTP offset monitor (runs ptp4l client)" \
+      "back|‹ back")"
+    case "$k" in
+      igmp) run sudo tcpdump -i "$IFACE" -n -v igmp ;;
+      groups) page sudo nmap --script broadcast-igmp-discovery -e "$IFACE" ;;
+      joined) run ip maddr show ;;
+      omping) if have omping; then
+                local self peer; self="$(ask_req "This device IP:" "${SELFIP:-}")" || continue
+                peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || continue
+                run omping "$self" "$peer"
+              else clear
+                echo "omping isn't installed — and it can't be auto-installed:"
+                echo "  • not in Debian/Raspberry Pi OS apt"
+                echo "  • ships only as source (no arm64 binary), and netkit never compiles on the Pi"
+                echo "To use this 2-device multicast test, build it yourself:"
+                echo "  github.com/troglobit/omping  (make && sudo make install)"
+                echo
+                echo "The single-device multicast checks above (IGMP, groups, joined) still work."
+                pause; fi ;;
+      ptpwatch) run sudo tcpdump -i "$IFACE" -n -v udp port 319 or udp port 320 ;;
+      ptpmon) require ptp4l linuxptp || continue
+              clear
+              echo "Runs a PTP client on $IFACE to read offset from the grandmaster."
+              echo "NOTE: this may step the system clock. Ctrl-C to stop."
               echo
-              echo "The single-device multicast checks above (IGMP, groups, joined) still work."
-              pause; fi ;;
-    ptpwatch) run sudo tcpdump -i "$IFACE" -n -v udp port 319 or udp port 320 ;;
-    ptpmon) require ptp4l linuxptp || return
-            clear
-            echo "Runs a PTP client on $IFACE to read offset from the grandmaster."
-            echo "NOTE: this may step the system clock. Ctrl-C to stop."
-            echo
-            read -rp "↩ Enter to start (Ctrl-C to cancel)… " _
-            run sudo ptp4l -i "$IFACE" -s -m -S ;;
-    *) return ;;
-  esac
+              read -rp "↩ Enter to start (Ctrl-C to cancel)… " _
+              run sudo ptp4l -i "$IFACE" -s -m -S ;;
+      *) return ;;
+    esac
+  done
 }
 
 m_rf() {
-  local k; k="$(menu "📶 Bluetooth / RF" \
-    "btscan|Bluetooth scan (BLE + classic, onboard)" \
-    "btinfo|Bluetooth adapter info" \
-    "btmon|Bluetooth live monitor (HCI trace)" \
-    "sub|Sub-GHz decode 433/868 MHz (RTL-SDR)" \
-    "mqtt|Sub-GHz → MQTT (publish decoded sensors)" \
-    "sweep|Spectrum sweep (RTL-SDR → CSV)" \
-    "sdrtest|Test RTL-SDR dongle is present" \
-    "back|‹ back")"
-  case "$k" in
-    btscan) bt_scan ;;
-    btinfo) require bluetoothctl bluez || return; run bluetoothctl show ;;
-    btmon) require btmon bluez || return; run sudo btmon ;;
-    sub) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
-         local fr; fr="$(ask_req "Frequency:" "433.92M")" || return
-         run rtl_433 -f "$fr" ;;
-    mqtt) require rtl_433 "rtl-433 + RTL-SDR dongle" || return
-          local fr br; br="$(ask_req "MQTT broker IP:" "${SITE_MQTT:-$GW}")" || return
-          fr="$(ask_req "Frequency:" "433.92M")" || return
-          run rtl_433 -f "$fr" -F "mqtt://$br:1883" ;;
-    sweep) require rtl_power "rtl-sdr + RTL-SDR dongle" || return
-           local lo hi out; lo="$(ask_req "Start freq:" "433M")" || return
-           hi="$(ask_req "End freq:" "435M")" || return
-           out="$(report_dir)/sweep-$(date +%Y%m%d-%H%M).csv"
-           # Quoted args, no bash -c: freq/path metacharacters cannot execute.
-           clear; echo "\$ rtl_power -f ${lo}:${hi}:1k -g 25 -i 1 -1 $out"
-           echo "------------------------------------------"
-           rtl_power -f "${lo}:${hi}:1k" -g 25 -i 1 -1 "$out" && echo "Wrote $out"
-           pause ;;
-    sdrtest) require rtl_test rtl-sdr || return; run rtl_test -t ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "📶 Bluetooth / RF" \
+      "btscan|Bluetooth scan (BLE + classic, with RSSI)" \
+      "btdev|BT device info (drill into a scanned device)" \
+      "btadapt|Bluetooth adapter info" \
+      "btmon|Bluetooth live monitor (HCI trace)" \
+      "sub|Sub-GHz decode 433/868 MHz (RTL-SDR)" \
+      "mqtt|Sub-GHz → MQTT (publish decoded sensors)" \
+      "sweep|Spectrum sweep (RTL-SDR → CSV)" \
+      "sdrtest|Test RTL-SDR dongle is present" \
+      "back|‹ back")"
+    case "$k" in
+      btscan) bt_scan ;;
+      btdev) bt_info ;;
+      btadapt) require bluetoothctl bluez || continue; run bluetoothctl show ;;
+      btmon) bt_monitor ;;
+      sub) require rtl_433 "rtl-433 + RTL-SDR dongle" || continue
+           local fr; fr="$(ask_req "Frequency:" "433.92M")" || continue
+           run rtl_433 -f "$fr" ;;
+      mqtt) require rtl_433 "rtl-433 + RTL-SDR dongle" || continue
+            local fr br; br="$(ask_req "MQTT broker IP:" "${SITE_MQTT:-$GW}")" || continue
+            fr="$(ask_req "Frequency:" "433.92M")" || continue
+            run rtl_433 -f "$fr" -F "mqtt://$br:1883" ;;
+      sweep) require rtl_power "rtl-sdr + RTL-SDR dongle" || continue
+             local lo hi out; lo="$(ask_req "Start freq:" "433M")" || continue
+             hi="$(ask_req "End freq:" "435M")" || continue
+             out="$(report_dir)/sweep-$(date +%Y%m%d-%H%M).csv"
+             # Quoted args, no bash -c: freq/path metacharacters cannot execute.
+             clear; echo "\$ rtl_power -f ${lo}:${hi}:1k -g 25 -i 1 -1 $out"
+             echo "------------------------------------------"
+             rtl_power -f "${lo}:${hi}:1k" -g 25 -i 1 -1 "$out" && echo "Wrote $out"
+             pause ;;
+      sdrtest) require rtl_test rtl-sdr || continue; run rtl_test -t ;;
+      *) return ;;
+    esac
+  done
+}
+
+# --- Bluetooth --------------------------------------------------------------
+# Scans use 'sudo btmgmt find' (ships with bluez; the only apt tool that returns
+# address + name + RSSI + LE/classic type for both transports in one parseable
+# shot). hcitool/hciconfig are deprecated; bluetoothctl 'devices' only lists the
+# cached/paired set with no live RSSI, so it is the no-btmgmt fallback only.
+
+bt_preflight() {           # 0 = a controller is ready; else explain + bail
+  require bluetoothctl bluez || return 1
+  bluetoothctl list 2>/dev/null | grep -q '^Controller' && return 0
+  clear; bad "no Bluetooth controller available"
+  if have rfkill && rfkill list bluetooth 2>/dev/null | grep -qi 'soft blocked: yes'; then
+    warn "radio is soft-blocked by rfkill"
+    if have gum; then
+      gum confirm "Run 'sudo rfkill unblock bluetooth' now?" && sudo rfkill unblock bluetooth
+    else
+      local a; read -rp "Run 'sudo rfkill unblock bluetooth' now? (y/N): " a
+      case "$a" in y|Y|yes|YES) sudo rfkill unblock bluetooth ;; esac
+    fi
+    bluetoothctl list 2>/dev/null | grep -q '^Controller' && return 0
+  else
+    warn "controller missing or bluetoothd down (try: sudo systemctl start bluetooth)"
+  fi
+  return 1
+}
+
+bt_discover() {            # secs transport(all|le|classic) [cache] -> prints + caches MAC|name|rssi|type
+  local secs="$1" transport="${2:-all}" cache="${3:-$bt_cache}" flags=()
+  case "$transport" in le) flags=(-l) ;; classic) flags=(-b) ;; esac
+  mkdir -p "$NETKIT_CFG_DIR" 2>/dev/null
+  bluetoothctl power on >/dev/null 2>&1   # discovery is rejected on a powered-off controller
+  # --timeout is a GLOBAL option and must precede the 'find' subcommand; no
+  # --index (bluez #893 breaks it non-interactively — the single Pi controller
+  # is hci0 by default). Name arrives on a separate, often-absent line, so key
+  # the table on the address and backfill the name when a 'name' line follows.
+  sudo btmgmt --timeout "$secs" find "${flags[@]}" 2>/dev/null | awk '
+    /dev_found:/ {
+      mac=""; bt=""; rs=""
+      for (i=1;i<=NF;i++) {
+        if ($i=="dev_found:") mac=$(i+1)
+        else if ($i=="type") bt=$(i+1)
+        else if ($i=="rssi") rs=$(i+1)
+      }
+      if (mac!="") { cur=mac; typ[mac]=bt; rssi[mac]=rs; if (!(mac in seen)) { seen[mac]=1; name[mac]="" } }
+      next
+    }
+    $1=="name" && cur!="" { n=$0; sub(/^name /,"",n); name[cur]=n }
+    END { for (m in seen) printf "%s|%s|%s|%s\n", m, (name[m]==""?"(unknown)":name[m]), rssi[m], typ[m] }
+  ' | sort -t'|' -k3,3nr | tee "$cache"
+}
+
+bt_table() {               # stdin: MAC|name|rssi|type lines -> aligned table
+  awk -F'|' 'BEGIN{printf "%-18s %5s  %-9s  %s\n","ADDRESS","RSSI","TYPE","NAME"}
+             {printf "%-18s %5s  %-9s  %s\n",$1,$3,$4,$2}'
 }
 
 bt_scan() {
-  require bluetoothctl bluez || return
-  local secs; secs="$(ask_num "Scan seconds:" "12")" || return
+  bt_preflight || { pause; return; }
+  if ! have btmgmt; then
+    clear; warn "btmgmt not found — showing cached device list (no live RSSI)"
+    run bluetoothctl devices
+    return
+  fi
+  local secs t transport
+  secs="$(ask_num "Scan seconds:" "12")" || return
+  t="$(menu "Transport" "all|BLE + classic" "le|BLE only" "classic|Classic only")"
+  [ -z "$t" ] && return
+  case "$t" in le) transport=le ;; classic) transport=classic ;; *) transport=all ;; esac
   clear
-  echo "\$ bluetoothctl --timeout $secs scan on"
+  echo "\$ sudo btmgmt --timeout $secs find   [$transport]"
   echo "------------------------------------------"
-  bluetoothctl power on >/dev/null 2>&1
-  bluetoothctl --timeout "$secs" scan on
-  echo; echo "Discovered devices:"; bluetoothctl devices
+  echo "Scanning ${secs}s (strongest signal first)…"
+  local out; out="$(bt_discover "$secs" "$transport")"
+  echo
+  if [ -z "$out" ]; then
+    warn "no devices discovered"
+  else
+    printf '%s\n' "$out" | bt_table
+    echo; echo "$(printf '%s\n' "$out" | grep -c .) device(s).  'BT device info' drills into one."
+  fi
   pause
 }
 
-m_report() {
-  local k; k="$(menu "📊 Reporting" \
-    "snap|Site snapshot → markdown report" \
-    "sweep|Full sweep → branded report (PDF-ready)" \
-    "savelast|Save last viewed output → report" \
-    "vnstat|vnstat traffic summary" \
-    "rec|Record terminal session (asciinema)" \
-    "back|‹ back")"
-  case "$k" in
-    snap) gen_report ;;
-    sweep) gen_sweep ;;
-    savelast) save_last_report ;;
-    vnstat) run vnstat ;;
-    rec) local f; f="$(report_dir)/session-$(date +%Y%m%d-%H%M).cast"; run asciinema rec "$f" ;;
+bt_info() {
+  require bluetoothctl bluez || return
+  [ -s "$bt_cache" ] || { clear; warn "no scan cached — run a Bluetooth scan first"; pause; return; }
+  local args=() mac name
+  while IFS='|' read -r mac name _ _; do
+    [ -n "$mac" ] && args+=("$mac|$name ($mac)")
+  done < "$bt_cache"
+  [ ${#args[@]} -eq 0 ] && { clear; warn "no devices in last scan"; pause; return; }
+  local pick; pick="$(menu "Pick a device" "${args[@]}")"
+  [ -z "$pick" ] && return
+  clear
+  echo "\$ bluetoothctl info $pick"
+  echo "------------------------------------------"
+  bluetoothctl info "$pick"
+  echo; warn "Service/UUID detail is richer for paired or actively-connected devices."
+  pause
+}
+
+bt_monitor() {
+  require btmon bluez || return
+  local mode; mode="$(menu "Bluetooth monitor (HCI trace)" \
+    "live|Live trace (watch now)" \
+    "capture|Capture to file (.btsnoop → Wireshark)")"
+  case "$mode" in
+    live) run sudo btmon ;;
+    capture)
+      local out; out="$(report_dir)/bt-$(date +%Y%m%d-%H%M%S).btsnoop"
+      clear
+      echo "\$ sudo btmon -w $out"
+      echo "------------------------------------------"
+      echo "Capturing… Ctrl-C to stop."
+      sudo btmon -w "$out"
+      echo; echo "Wrote $out  (open in Wireshark)"
+      pause ;;
     *) return ;;
   esac
+}
+
+bt_neighbourhood() {       # markdown-friendly block for reports; never prompts beyond sudo
+  have btmgmt || { echo 'btmgmt not installed'; return; }
+  bluetoothctl list 2>/dev/null | grep -q '^Controller' || { echo 'no Bluetooth controller'; return; }
+  # Scan to /dev/null, not $bt_cache — a report must not clobber the operator's
+  # last interactive scan that 'BT device info' (bt_info) reads.
+  local out; out="$(bt_discover 8 all /dev/null 2>/dev/null)"
+  [ -z "$out" ] && { echo 'no devices discovered'; return; }
+  printf '%s\n' "$out" | bt_table
+}
+
+m_report() {
+  while true; do
+    local k; k="$(menu "📊 Reporting" \
+      "snap|Site snapshot → markdown report" \
+      "sweep|Full sweep → branded report (PDF-ready)" \
+      "savelast|Save last viewed output → report" \
+      "vnstat|vnstat traffic summary" \
+      "rec|Record terminal session (asciinema)" \
+      "back|‹ back")"
+    case "$k" in
+      snap) gen_report ;;
+      sweep) gen_sweep ;;
+      savelast) save_last_report ;;
+      vnstat) run vnstat ;;
+      rec) local f; f="$(report_dir)/session-$(date +%Y%m%d-%H%M).cast"; run asciinema rec "$f" ;;
+      *) return ;;
+    esac
+  done
 }
 
 # Append the most recent paged output (set by page()) to a dated capture file.
@@ -1170,27 +1346,29 @@ save_last_report() {
 }
 
 m_system() {
-  local k; k="$(menu "⚙️ System / Network info" \
-    "if|Interface overview" \
-    "eth|Wired link speed/duplex (ethtool)" \
-    "subnet|Subnet calculator (ipcalc)" \
-    "rt|Routing table" \
-    "dns|DNS resolver status" \
-    "dash|Live tiled dashboard (tmux)" \
-    "back|‹ back")"
-  case "$k" in
-    if) run ip -c -br addr ;;
-    eth) require ethtool ethtool || return
-         local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || return
-         run ethtool "$dev" ;;
-    subnet) require ipcalc ipcalc || return
-            local c; c="$(ask_cidr "Address/CIDR:" "${CIDR:-192.168.1.0/24}")" || return
-            run ipcalc "$c" ;;
-    rt) run ip -c route ;;
-    dns) if have resolvectl; then run resolvectl status; else run cat /etc/resolv.conf; fi ;;
-    dash) run_dash ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "⚙️ System / Network info" \
+      "if|Interface overview" \
+      "eth|Wired link speed/duplex (ethtool)" \
+      "subnet|Subnet calculator (ipcalc)" \
+      "rt|Routing table" \
+      "dns|DNS resolver status" \
+      "dash|Live tiled dashboard (tmux)" \
+      "back|‹ back")"
+    case "$k" in
+      if) run ip -c -br addr ;;
+      eth) require ethtool ethtool || continue
+           local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || continue
+           run ethtool "$dev" ;;
+      subnet) require ipcalc ipcalc || continue
+              local c; c="$(ask_cidr "Address/CIDR:" "${CIDR:-192.168.1.0/24}")" || continue
+              run ipcalc "$c" ;;
+      rt) run ip -c route ;;
+      dns) if have resolvectl; then run resolvectl status; else run cat /etc/resolv.conf; fi ;;
+      dash) run_dash ;;
+      *) return ;;
+    esac
+  done
 }
 
 # ---------- Building / OT protocols ----------
@@ -1204,19 +1382,21 @@ ot_sweep() {
 }
 
 m_ot() {
-  local k; k="$(menu "🏭 Building / OT" \
-    "modbus|Modbus (scan / read / write)" \
-    "bacnet|BACnet/IP (discover / read / write)" \
-    "knx|KNX (monitor / group read / write)" \
-    "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
-    "back|‹ back")"
-  case "$k" in
-    modbus) m_modbus ;;
-    bacnet) m_bacnet ;;
-    knx) m_knx ;;
-    sweep) ot_sweep ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🏭 Building / OT" \
+      "modbus|Modbus (scan / read / write)" \
+      "bacnet|BACnet/IP (discover / read / write)" \
+      "knx|KNX (monitor / group read / write)" \
+      "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
+      "back|‹ back")"
+    case "$k" in
+      modbus) m_modbus ;;
+      bacnet) m_bacnet ;;
+      knx) m_knx ;;
+      sweep) ot_sweep ;;
+      *) return ;;
+    esac
+  done
 }
 
 # Modbus connection prompt -> fills G_MB_OPTS (mbpoll option args) + G_MB_TARGET
@@ -1275,19 +1455,21 @@ modbus_rw() {
 
 m_modbus() {
   require mbpoll "mbpoll" || return
-  local k; k="$(menu "🔧 Modbus" \
-    "scan|Scan for Modbus devices (nmap, TCP 502)" \
-    "read|Read registers" \
-    "write|Write a register" \
-    "back|‹ back")"
-  case "$k" in
-    scan) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
-          page sudo nmap -p502 --open --script modbus-discover \
-            --script-args modbus-discover.aggressive=true "$n" ;;
-    read) modbus_rw read ;;
-    write) modbus_rw write ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🔧 Modbus" \
+      "scan|Scan for Modbus devices (nmap, TCP 502)" \
+      "read|Read registers" \
+      "write|Write a register" \
+      "back|‹ back")"
+    case "$k" in
+      scan) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
+            page sudo nmap -p502 --open --script modbus-discover \
+              --script-args modbus-discover.aggressive=true "$n" ;;
+      read) modbus_rw read ;;
+      write) modbus_rw write ;;
+      *) return ;;
+    esac
+  done
 }
 
 bacnet_read() {
@@ -1315,23 +1497,25 @@ bacnet_write() {
 m_bacnet() {
   need_iface || return
   [ -n "$SELFIP" ] || { clear; echo "No local IPv4 address — BACnet needs a bound source address (check link/DHCP)."; pause; return; }
-  local k; k="$(menu "🏢 BACnet/IP ($IFACE)" \
-    "nmap|Discover devices (nmap, no setup needed)" \
-    "whois|Discover devices (WhoIs, rusty-bacnet)" \
-    "read|Read a property" \
-    "write|Write a property" \
-    "back|‹ back")"
-  case "$k" in
-    nmap) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
-          page sudo nmap -sU -p47808 --open --script bacnet-info "$n" ;;
-    whois) require bacnet "bacnet (rusty-bacnet)" || return
-           local r; r="$(ask "Instance range (blank = all, e.g. 1-4000):" "")"
-           if [ -n "$r" ]; then page bacnet -i "$SELFIP" discover "$r"
-           else page bacnet -i "$SELFIP" discover; fi ;;
-    read) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_read ;;
-    write) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_write ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🏢 BACnet/IP ($IFACE)" \
+      "nmap|Discover devices (nmap, no setup needed)" \
+      "whois|Discover devices (WhoIs, rusty-bacnet)" \
+      "read|Read a property" \
+      "write|Write a property" \
+      "back|‹ back")"
+    case "$k" in
+      nmap) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
+            page sudo nmap -sU -p47808 --open --script bacnet-info "$n" ;;
+      whois) require bacnet "bacnet (rusty-bacnet)" || continue
+             local r; r="$(ask "Instance range (blank = all, e.g. 1-4000):" "")"
+             if [ -n "$r" ]; then page bacnet -i "$SELFIP" discover "$r"
+             else page bacnet -i "$SELFIP" discover; fi ;;
+      read) require bacnet "bacnet (rusty-bacnet)" || continue; bacnet_read ;;
+      write) require bacnet "bacnet (rusty-bacnet)" || continue; bacnet_write ;;
+      *) return ;;
+    esac
+  done
 }
 
 # knxtool talks KNXnet/IP directly from the URL — no running knxd daemon needed for
@@ -1349,23 +1533,25 @@ m_knx() {
   else
     url="ip:"
   fi
-  local k; k="$(menu "🏗 KNX ($url)" \
-    "mon|Bus monitor (live)" \
-    "read|Group read" \
-    "write|Group write" \
-    "back|‹ back")"
-  case "$k" in
-    mon) run knxtool vbusmonitor1 "$url" ;;
-    read) local ga; ga="$(ask_req "Group address (x/y/z):" "")" || return
-          page knxtool groupread "$url" "$ga" ;;
-    write) local ga val a
-           ga="$(ask_req "Group address (x/y/z):" "")" || return
-           val="$(ask_req "Value (decimal byte(s)):" "")" || return
-           a="$(ask "Write '$val' to $ga via $url? (y/N):" "N")"
-           case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
-           page knxtool groupwrite "$url" "$ga" "$val" ;;
-    *) return ;;
-  esac
+  while true; do
+    local k; k="$(menu "🏗 KNX ($url)" \
+      "mon|Bus monitor (live)" \
+      "read|Group read" \
+      "write|Group write" \
+      "back|‹ back")"
+    case "$k" in
+      mon) run knxtool vbusmonitor1 "$url" ;;
+      read) local ga; ga="$(ask_req "Group address (x/y/z):" "")" || continue
+            page knxtool groupread "$url" "$ga" ;;
+      write) local ga val a
+             ga="$(ask_req "Group address (x/y/z):" "")" || continue
+             val="$(ask_req "Value (decimal byte(s)):" "")" || continue
+             a="$(ask "Write '$val' to $ga via $url? (y/N):" "N")"
+             case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; continue ;; esac
+             page knxtool groupwrite "$url" "$ga" "$val" ;;
+      *) return ;;
+    esac
+  done
 }
 
 # ---------- report generators ----------
@@ -1374,9 +1560,10 @@ gen_report() {
   local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/snapshot-$ts.md"
   clear
   echo "Gathering snapshot (arp-scan + nmap ping sweep)… a few seconds."
-  local arp nmap_sn
+  local arp nmap_sn bt
   arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
   nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
+  bt="$(bt_neighbourhood)"
 
   cat > "$f" <<RPT
 # Network Site Snapshot
@@ -1411,6 +1598,11 @@ $nmap_sn
 $(sudo lldpcli show neighbors 2>/dev/null || echo 'no LLDP neighbour seen')
 \`\`\`
 
+## Bluetooth neighbourhood
+\`\`\`
+$bt
+\`\`\`
+
 ---
 *Generated by netkit v${NETKIT_VERSION}.*
 RPT
@@ -1425,7 +1617,7 @@ gen_sweep() {
   need_iface || return
   local dir f ts; dir="$(report_dir)"; ts="$(date +%Y%m%d-%H%M)"; f="$dir/sweep-$ts.md"
   clear; echo "Running full sweep — this can take a minute…"
-  local arp nmap_sn lldp dhcp wan hosts logo
+  local arp nmap_sn lldp dhcp wan hosts logo bt
   arp="$(sudo arp-scan --interface="$IFACE" --localnet 2>/dev/null | grep -E '^[0-9]' || echo 'arp-scan unavailable')"
   nmap_sn="$(sudo nmap -sn "${CIDR:-$IFACE}" 2>/dev/null | grep -E 'Nmap scan report' || echo 'nmap unavailable')"
   hosts="$(printf '%s\n' "$nmap_sn" | grep -c 'Nmap scan report')"
@@ -1433,6 +1625,7 @@ gen_sweep() {
   dhcp="$(sudo nmap --script broadcast-dhcp-discover -e "$IFACE" 2>/dev/null | sed -n '/broadcast-dhcp-discover/,$p' || echo 'n/a')"
   if have librespeed-cli; then wan="$(librespeed-cli --no-icmp 2>/dev/null || echo 'WAN test failed')"
   else wan='librespeed-cli not installed'; fi
+  bt="$(bt_neighbourhood)"
   logo=""
   [ -n "${SITE_LOGO:-}" ] && [ -f "$SITE_LOGO" ] && logo="![logo]($SITE_LOGO)"
 
@@ -1483,6 +1676,11 @@ $lldp
 ## WAN throughput
 \`\`\`
 $wan
+\`\`\`
+
+## Bluetooth neighbourhood
+\`\`\`
+$bt
 \`\`\`
 
 ---
@@ -1555,7 +1753,7 @@ do_setup() {
   sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
-              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd
+              bluez bluez-tools rfkill rtl-433 rtl-sdr swaks tio xxd
               mbpoll knxd-tools)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
@@ -1607,7 +1805,7 @@ do_selftest() {
   done
   say "Optional extras"
   local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
-                  ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
+                  ipcalc wakeonlan bluetoothctl btmgmt btmon rfkill rtl_433 rtl_power swaks
                   ptp4l rdisc6 tio socat xxd
                   mbpoll knxtool bacnet)
   for x in "${extras[@]}"; do
@@ -1762,6 +1960,7 @@ quick_run() {
               run sudo arp-scan --interface="$IFACE" --localnet ;;
     nsn)      local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
+    btscan)   bt_scan ;;
     selftest) clear; do_selftest; pause ;;
     sweep)    gen_sweep ;;
     *) : ;;
@@ -1769,15 +1968,18 @@ quick_run() {
 }
 
 m_quick() {
-  local k; k="$(menu "⚡ Quick checks" \
-    "gw|Ping gateway" \
-    "arp|ARP sweep (layer-2)" \
-    "nsn|Nmap ping sweep" \
-    "lldp|LLDP neighbour (switch / port)" \
-    "selftest|Self-test (tools + live network)" \
-    "sweep|Full sweep → report" \
-    "back|‹ back")"
-  case "$k" in ""|back) return ;; *) quick_run "$k" ;; esac
+  while true; do
+    local k; k="$(menu "⚡ Quick checks" \
+      "gw|Ping gateway" \
+      "arp|ARP sweep (layer-2)" \
+      "nsn|Nmap ping sweep" \
+      "lldp|LLDP neighbour (switch / port)" \
+      "btscan|Bluetooth scan (name + RSSI)" \
+      "selftest|Self-test (tools + live network)" \
+      "sweep|Full sweep → report" \
+      "back|‹ back")"
+    case "$k" in ""|back) return ;; *) quick_run "$k" ;; esac
+  done
 }
 
 show_help() {
@@ -1861,23 +2063,27 @@ while true; do
   clear; banner
   status_line; echo
   k="$(menu "Pick a category" \
-    "quick|⚡ Quick checks" \
-    "discovery|🔍 Discovery" \
-    "link|🔗 Link & Throughput" \
-    "wifi|📡 WiFi" \
-    "packet|🧰 Packet Inspection" \
-    "dns|🌐 DNS / HTTP / Mail" \
-    "lldp|🔌 Switch Port (LLDP / SNMP)" \
-    "devctl|🎛 Device Control (RS232 / IP)" \
-    "avoip|🎚 AV-over-IP (multicast / PTP)" \
-    "iot|🏠 Smart Home / IoT" \
-    "rf|📶 Bluetooth / RF" \
-    "ot|🏭 Building / OT" \
-    "report|📊 Reporting" \
-    "system|⚙️ System / Network info" \
-    "site|🏷 Site profile" \
-    "help|❓ Help / keys" \
-    "quit|✖ Quit")"
+    "-|── everyday ──────────────" \
+    "quick|Quick checks" \
+    "discovery|Discovery" \
+    "link|Link & Throughput" \
+    "wifi|WiFi" \
+    "-|── inspect ───────────────" \
+    "packet|Packet Inspection" \
+    "dns|DNS / HTTP / Mail" \
+    "lldp|Switch Port · lldp / snmp" \
+    "-|── control ───────────────" \
+    "devctl|Device Control · rs232 / ip" \
+    "avoip|AV-over-IP · multicast / ptp" \
+    "iot|Smart Home / IoT" \
+    "rf|Bluetooth / RF" \
+    "ot|Building / OT" \
+    "-|── system ────────────────" \
+    "report|Reporting" \
+    "system|System / Network info" \
+    "site|Site profile" \
+    "help|Help / keys" \
+    "quit|Quit")"
   case "$k" in
     quick) m_quick ;;
     discovery) m_discovery ;;
