@@ -13,7 +13,7 @@ those conventions, agents, or skills apply here.
 
 ## What this is
 
-A single 1100-line bash script (`netkit`) that is a categorised network
+A single ~2150-line bash script (`netkit`) that is a categorised network
 testing/inspection/reporting dashboard for a Raspberry Pi 5 handheld (aarch64,
 Raspberry Pi OS Bookworm). No build step, no package, no in-script dependencies.
 "Installing" = copying the one file to `/usr/local/bin/netkit`. `older_versions/`
@@ -65,29 +65,29 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    gping, btmon, tcpdump etc. own the terminal and corrupt if captured; call those via
    `run` only. A single `trap … INT` near the main loop makes Ctrl-C abort the
    current action and return to the menu rather than kill netkit.
-3. **Site profiles** (~line 91–195) — per-location defaults in
+3. **Site profiles** (~line 219–330) — per-location defaults in
    `~/.config/netkit/sites/<name>.conf`. `load_site` is a **whitelist `key=value`
    parser** — the `.conf` is *never* sourced/executed (security boundary; don't replace
    it with `source`). Fields populate `SITE_*` globals consumed by menu actions.
    Whitelisted keys include `SNMP_TARGET` (switch IP for the report SNMP/PoE section).
-4. **Live network facts** (~line 225–241) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
+4. **Live network facts** (~line 381–393) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
    `WIRED` detected at launch from `ip`/sysfs. Re-detected every run; menus read these.
-5. **Category menus** `m_*` (~line 244–719) — one function per dashboard category
+5. **Category menus** `m_*` (~line 736–1599) — one function per dashboard category
    (`m_discovery`, `m_link`, `m_wifi`, `m_packet`, `m_dns`, `m_lldp`, `m_snmp`,
-   `m_avoip`, `m_iot`, `m_rf`, `m_report`, `m_system`, `m_site`, `m_ot`). Each builds a
-   `menu` and dispatches to actions wrapped in `run`/`page`.
+   `m_devctl`, `m_avoip`, `m_iot`, `m_rf`, `m_ot`, `m_report`, `m_system`, `m_site`).
+   Each builds a `menu` and dispatches to actions wrapped in `run`/`page`.
 6. **Report generators** — `gen_report` (snapshot), `gen_sweep` (branded commissioning
    sweep), `run_dash` (tmux tiled view). Output goes under `report_dir`:
    `~/netkit-reports/<site|default>/<date>/`.
-7. **Prebuilt-binary registry** (~line 862) — four parallel arrays
+7. **Prebuilt-binary registry** (~line 1761) — four parallel arrays
    `PREBUILT_REPOS / PREBUILT_RX / PREBUILT_BIN / PREBUILT_NAME` for the GitHub-release
-   tools (`librespeed-cli`, `gping`, `bandwhich`, `xh`). Shared by `install_release_bin`
+   tools (`librespeed-cli`, `gping`, `bandwhich`, `xh`, `bacnet`/rusty-bacnet). Shared by `install_release_bin`
    (used by `do_setup`) and `do_doctor`. **When a project renames its release asset, the
    fix is a one-line regex edit in `PREBUILT_RX`** — netkit falls back to the base tool
    meanwhile. `netkit doctor` exists to catch this drift proactively.
 8. **Subcommands** — `do_setup`, `do_selftest`, `do_doctor`, `do_update`,
    `do_uninstall`, `do_autostart`, `usage`.
-9. **Main dispatch** (~line 1077) — `load_site`, then a `case` on `$1` for subcommands;
+9. **Main dispatch** (~line 2086) — `load_site`, then a `case` on `$1` for subcommands;
    no arg → the interactive category loop.
 
 ### Adding a feature
@@ -109,7 +109,7 @@ on them — asset naming drifts.
 netkit              # interactive dashboard (default)
 netkit setup        # install apt packages + prebuilt aarch64 binaries
 netkit selftest     # confirm tools present + gateway/subnet reachable
-netkit doctor       # confirm the 4 GitHub-binary matchers still resolve
+netkit doctor       # confirm the 5 GitHub-binary matchers still resolve
 netkit dash | report | sweep | site [name] | autostart on|off | update [URL]
 ```
 

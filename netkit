@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.2.1"
+NETKIT_VERSION="4.3.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
