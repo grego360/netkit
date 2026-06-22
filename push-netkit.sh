@@ -3,12 +3,25 @@
 # Lints first (never ship a broken script), scp's to /tmp, then installs it to
 # /usr/local/bin/netkit via sudo and prints the running version.
 #
-# Usage:  ./push-netkit.sh                 # use the default Pi below
-#         ./push-netkit.sh user@host       # override target
-#         NETKIT_PI=user@host ./push-netkit.sh
+# Usage:  ./push-netkit.sh                 # local Pi (default)
+#         ./push-netkit.sh local           # local Pi, explicit
+#         ./push-netkit.sh remote          # remote Pi (pocket-term-rpi)
+#         ./push-netkit.sh user@host       # literal target override
+#         NETKIT_PI=user@host ./push-netkit.sh   # override the default (no-arg) target
 set -euo pipefail
 
-PI="${1:-${NETKIT_PI:-terminosa@10.1.20.176}}"
+PI_LOCAL="terminosa@10.1.20.176"      # on-LAN address
+PI_REMOTE="terminosa@pocket-term-rpi" # hostname-resolved address (VPN / SSH config / mDNS)
+
+# Resolve the target: a bare 'local'/'remote' picks a known Pi; anything else is
+# treated as a literal user@host; no arg keeps the env-override-or-local default.
+case "${1:-}" in
+  "")      PI="${NETKIT_PI:-$PI_LOCAL}" ;;
+  local)   PI="$PI_LOCAL" ;;
+  remote)  PI="$PI_REMOTE" ;;
+  *)       PI="$1" ;;
+esac
+
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SRC="$HERE/netkit"
 
