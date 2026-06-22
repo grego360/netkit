@@ -385,6 +385,24 @@ framing_tio() {
   printf '%s' "-d $bits -p $p -s $stop"
 }
 
+# devctl_emit format payload eol -> raw bytes on STDOUT (streamed; NUL-safe).
+# ascii uses %s (no accidental escape expansion); hex uses xxd -r -p (emits 0x00 too).
+devctl_emit() {
+  case "$1" in
+    ascii) printf '%s' "$2" ;;
+    hex)   printf '%s' "$2" | tr -d ' ' | sed 's/0[xX]//g' | xxd -r -p ;;
+  esac
+  case "$3" in cr) printf '\r' ;; lf) printf '\n' ;; crlf) printf '\r\n' ;; esac
+}
+
+# devctl_valid_hex string -> rc 0 if even-length hex (spaces / 0x prefixes allowed)
+devctl_valid_hex() {
+  local h; h="$(printf '%s' "$1" | tr -d ' ' | sed 's/0[xX]//g')"
+  [ -n "$h" ] || return 1
+  case "$h" in *[!0-9A-Fa-f]*) return 1 ;; esac
+  [ $(( ${#h} % 2 )) -eq 0 ]
+}
+
 # ---------- categories ----------
 m_discovery() {
   local k; k="$(menu "🔍 Discovery" \
