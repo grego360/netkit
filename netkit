@@ -140,7 +140,9 @@ ask_cidr() { # prompt default -> address/prefix
 pause() { echo; read -rp "↩ Enter to return to menu… " _; }
 
 run() { clear; echo "\$ $*"; echo "------------------------------------------"; "$@"; pause; }
-runsh() { clear; echo "\$ $1"; echo "------------------------------------------"; bash -c "$1"; pause; }
+# (No runsh/bash -c wrapper by design: it invited command injection from prompt
+# input. Use array-form `run`, or an inline clear/echo/cmd/pause block when a
+# redirect or compound command is genuinely needed — never build a shell string.)
 
 # spin <title> <cmd...>: show a gum spinner while cmd runs (its output is hidden),
 # returning the command's exit code. Falls back to a plain status line without gum.
