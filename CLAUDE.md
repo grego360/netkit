@@ -55,12 +55,15 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    one colour palette (`C_OK/C_WARN/C_ERR/C_HDR/C_RST`, honours `NO_COLOR`/non-tty),
    `menu "Header" "key|Label" …` (gum chooser; arrow/scroll list, returns chosen key),
    `ask`/`ask_req`/`ask_pw` and validating `ask_num`/`ask_ip`/`ask_cidr`, `pause`,
-   `run`/`runsh` (clear → echo command → run → pause), `page` (capture + pager for long
-   **batch** output), `spin` (gum progress for slow hidden-output steps),
-   `say`/`ok`/`warn`/`bad`, `need_iface`. **Capturing wrappers (`run`/`runsh` must not
-   wrap interactive TUIs; `page` must only wrap batch commands)** — wavemon, termshark,
+   `run` (clear → echo command → run → pause; **array-form, never a shell string** —
+   there is deliberately no `runsh`/`bash -c` wrapper, as it invited command injection
+   from prompt input; when a redirect or compound command is genuinely needed, write an
+   inline `clear`/`echo`/`cmd`/`pause` block with quoted args), `page` (capture + pager
+   for long **batch** output), `spin` (gum progress for slow hidden-output steps),
+   `say`/`ok`/`warn`/`bad`, `need_iface`. **`run` must not be confused with `page`:
+   `page` captures stdout and must only wrap batch commands** — wavemon, termshark,
    gping, btmon, tcpdump etc. own the terminal and corrupt if captured; call those via
-   `run`/`runsh` only. A single `trap … INT` near the main loop makes Ctrl-C abort the
+   `run` only. A single `trap … INT` near the main loop makes Ctrl-C abort the
    current action and return to the menu rather than kill netkit.
 3. **Site profiles** (~line 91–195) — per-location defaults in
    `~/.config/netkit/sites/<name>.conf`. `load_site` is a **whitelist `key=value`
@@ -70,8 +73,8 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    `WIRED` detected at launch from `ip`/sysfs. Re-detected every run; menus read these.
 5. **Category menus** `m_*` (~line 244–719) — one function per dashboard category
    (`m_discovery`, `m_link`, `m_wifi`, `m_packet`, `m_dns`, `m_lldp`, `m_snmp`,
-   `m_avoip`, `m_iot`, `m_rf`, `m_report`, `m_system`, `m_site`). Each builds a `menu`
-   and dispatches to actions wrapped in `run`/`runsh`.
+   `m_avoip`, `m_iot`, `m_rf`, `m_report`, `m_system`, `m_site`, `m_ot`). Each builds a
+   `menu` and dispatches to actions wrapped in `run`/`page`.
 6. **Report generators** — `gen_report` (snapshot), `gen_sweep` (branded commissioning
    sweep), `run_dash` (tmux tiled view). Output goes under `report_dir`:
    `~/netkit-reports/<site|default>/<date>/`.
@@ -88,8 +91,10 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
 
 ### Adding a feature
 Add the action inside the relevant `m_*` menu (a new `"key|Label"` line + a `case`
-branch). Use `run`/`runsh` for interactive/streaming commands and `page` for finite
-batch output. Gate any optional tool with `require <cmd> "<pkg>" || return` (not a
+branch). Use array-form `run` for interactive/streaming commands and `page` for finite
+batch output. Never build a shell string from prompt input (no `bash -c`); if a redirect
+or compound command is needed, write an inline `clear`/`echo`/`cmd`/`pause` block with
+quoted args. Gate any optional tool with `require <cmd> "<pkg>" || return` (not a
 hand-rolled "not installed" message). For a curated one-tap action, add an id to
 `quick_run` + a line to `m_quick` — no `m_*` rewrite needed. If it needs a new apt
 package, add it to the `pkgs` array in `do_setup` and the `extras` list in
