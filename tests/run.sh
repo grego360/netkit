@@ -47,10 +47,31 @@ test_devctl_valid_hex() {
   devctl_valid_hex "";           assert_rc 1 "$?" "reject empty"
 }
 
+test_devctl_emit() {
+  assert_eq "$(printf 'AT\r')"   "$(devctl_emit ascii AT cr)"   "emit ascii + CR"
+  assert_eq "$(printf 'AT\n')"   "$(devctl_emit ascii AT lf)"   "emit ascii + LF"
+  assert_eq "$(printf 'AT\r\n')" "$(devctl_emit ascii AT crlf)" "emit ascii + CRLF"
+  if command -v xxd >/dev/null 2>&1; then
+    assert_eq "$(printf 'AB')" "$(devctl_emit hex 4142 none)" "emit hex 4142 -> AB"
+  else
+    printf '  SKIP: emit hex (xxd absent)\n'
+  fi
+}
+
+test_devctl_addr() {
+  assert_eq "/dev/ttyUSB0,b9600,rawer,echo=0,clocal=1,cs8,parenb=0,cstopb=0,crtscts=0" \
+            "$(devctl_addr serial /dev/ttyUSB0 9600 8N1)" "serial addr 8N1"
+  assert_eq "TCP:1.2.3.4:4998" "$(devctl_addr tcp 1.2.3.4 4998)" "tcp addr"
+  assert_eq "UDP:1.2.3.4:4998" "$(devctl_addr udp 1.2.3.4 4998)" "udp addr"
+  devctl_addr serial x 9600 9N1 >/dev/null 2>&1; assert_rc 1 "$?" "serial addr rejects bad framing"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
 run_test test_devctl_valid_hex
+run_test test_devctl_emit
+run_test test_devctl_addr
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
