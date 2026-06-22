@@ -1181,11 +1181,13 @@ m_ot() {
   local k; k="$(menu "🏭 Building / OT" \
     "modbus|Modbus (scan / read / write)" \
     "bacnet|BACnet/IP (discover / read / write)" \
+    "knx|KNX (monitor / group read / write)" \
     "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
     "back|‹ back")"
   case "$k" in
     modbus) m_modbus ;;
     bacnet) m_bacnet ;;
+    knx) m_knx ;;
     sweep) ot_sweep ;;
     *) return ;;
   esac
@@ -1300,6 +1302,40 @@ m_bacnet() {
            else page bacnet -i "$SELFIP" discover; fi ;;
     read) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_read ;;
     write) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_write ;;
+    *) return ;;
+  esac
+}
+
+# knxtool talks KNXnet/IP directly from the URL — no running knxd daemon needed for
+# one-shot commands. ipt:<gw> = tunnelling to a specific interface (default);
+# ip: = multicast routing. vbusmonitor1 streams forever -> run (never page).
+m_knx() {
+  require knxtool "knxd-tools" || return
+  local mode url gw
+  mode="$(menu "Connection" \
+    "ipt|Tunnelling to a gateway (ipt:)" "ip|Routing / multicast (ip:)")"
+  [ -z "$mode" ] && return
+  if [ "$mode" = ipt ]; then
+    gw="$(ask_ip "KNXnet/IP gateway IP:" "$GW")" || return
+    url="ipt:$gw"
+  else
+    url="ip:"
+  fi
+  local k; k="$(menu "🏗 KNX ($url)" \
+    "mon|Bus monitor (live)" \
+    "read|Group read" \
+    "write|Group write" \
+    "back|‹ back")"
+  case "$k" in
+    mon) run knxtool vbusmonitor1 "$url" ;;
+    read) local ga; ga="$(ask_req "Group address (x/y/z):" "")" || return
+          page knxtool groupread "$url" "$ga" ;;
+    write) local ga val a
+           ga="$(ask_req "Group address (x/y/z):" "")" || return
+           val="$(ask_req "Value (decimal byte(s)):" "")" || return
+           a="$(ask "Write '$val' to $ga via $url? (y/N):" "N")"
+           case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+           page knxtool groupwrite "$url" "$ga" "$val" ;;
     *) return ;;
   esac
 }
