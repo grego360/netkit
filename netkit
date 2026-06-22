@@ -1309,15 +1309,16 @@ run_dash() {
 }
 
 # ---------- prebuilt-binary registry (shared by setup + doctor) ----------
-PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh)
+PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh jscott3201/rusty-bacnet)
 PREBUILT_RX=(
   'linux_arm64\.tar\.gz$'
   '(aarch64|arm64).*linux.*tar\.gz$|linux.*(musl|gnu).*(aarch64|arm64).*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
+  'bacnet-linux-arm64$'
 )
-PREBUILT_BIN=(librespeed-cli gping bandwhich xh)
-PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)')
+PREBUILT_BIN=(librespeed-cli gping bandwhich xh bacnet)
+PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)' 'bacnet (rusty-bacnet)')
 
 install_release_bin() { # repo  asset_regex  binname  friendly
   local repo="$1" rx="$2" bin="$3" friendly="${4:-$3}" url tmp found
@@ -1353,7 +1354,8 @@ do_setup() {
   sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
-              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd)
+              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd
+              mbpoll knxd-tools)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"
@@ -1401,7 +1403,8 @@ do_selftest() {
   say "Optional extras"
   local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
                   ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
-                  omping ptp4l rdisc6 tio socat xxd)
+                  omping ptp4l rdisc6 tio socat xxd
+                  mbpoll knxtool bacnet)
   for x in "${extras[@]}"; do
     if have "$x"; then ok "$x"; else warn "$x missing (run: netkit setup)"; fi
   done
@@ -1578,6 +1581,7 @@ CATEGORIES
   DNS/HTTP     dig, PTR, HTTP headers, port check, SMTP
   LLDP/SNMP    switch neighbour, SNMP (ports, PoE, traffic) - v2c/v3
   DevCtrl      RS232/TCP/UDP send+read, live session, saved devices, PJLink
+  OT/Building  Modbus (mbpoll), BACnet (nmap+rusty-bacnet), KNX (knxtool), ICS sweep
   AV-over-IP   IGMP, multicast groups, omping, PTP
   IoT          MQTT, Wake-on-LAN
   BT/RF        Bluetooth, RTL-SDR (433/868), spectrum sweep
