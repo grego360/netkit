@@ -66,12 +66,44 @@ test_devctl_addr() {
   devctl_addr serial x 9600 9N1 >/dev/null 2>&1; assert_rc 1 "$?" "serial addr rejects bad framing"
 }
 
+test_load_site() {
+  local d; d="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  NETKIT_CFG_DIR="$d"; site_dir="$d/sites"; mkdir -p "$site_dir"
+  # shellcheck disable=SC2016
+  printf 'SNMP_TARGET=10.0.0.5\nSNMP_COMMUNITY=sec\nBOGUS=ignored\nEVIL=$(touch %s/pwned)\n' "$d" > "$site_dir/foo.conf"
+  echo foo > "$d/active-site"
+  load_site
+  assert_eq "10.0.0.5" "$SITE_SNMP_TARGET"    "load_site parses SNMP_TARGET"
+  assert_eq "sec"      "$SITE_SNMP_COMMUNITY"  "load_site parses SNMP_COMMUNITY"
+  assert_eq "foo"      "$NETKIT_SITE"          "load_site sets active site"
+  [ -e "$d/pwned" ]; assert_rc 1 "$?" "load_site does NOT execute \$(...) in a .conf (security boundary)"
+  rm -rf "$d"
+}
+
+test_load_device() {
+  local d; d="$(mktemp -d)"
+  # shellcheck disable=SC2034
+  device_dir="$d/devices"; mkdir -p "$device_dir"
+  printf 'TRANSPORT=tcp\nHOST=1.2.3.4\nPORT=502\nCMD=Power On|ascii|PWR1|cr\nCMD=Power Off|ascii|PWR0|cr\n' > "$device_dir/proj.conf"
+  load_device proj
+  assert_eq "tcp"     "$DEV_TRANSPORT"           "load_device parses TRANSPORT"
+  assert_eq "1.2.3.4" "$DEV_HOST"                "load_device parses HOST"
+  assert_eq "502"     "$DEV_PORT"                "load_device parses PORT"
+  assert_eq "2"       "${#DEV_CMD_LABEL[@]}"     "load_device parses 2 CMD rows"
+  assert_eq "Power On" "${DEV_CMD_LABEL[0]}"     "load_device first CMD label"
+  assert_eq "PWR0"    "${DEV_CMD_PAYLOAD[1]}"    "load_device second CMD payload"
+  rm -rf "$d"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
 run_test test_devctl_valid_hex
 run_test test_devctl_emit
 run_test test_devctl_addr
+run_test test_load_site
+run_test test_load_device
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
