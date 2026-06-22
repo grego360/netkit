@@ -218,7 +218,7 @@ need_iface() {
 # ---------- site profiles ----------
 # Safe key=value parser (NOT sourced — config never executes as code).
 NETKIT_SITE=""
-SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
+SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_SNMP_TARGET=""; SITE_MQTT=""
 SITE_SPEED_MIN=""; SITE_DNS_DOMAIN=""; SITE_HTTP_URL=""; SITE_PEER=""; SITE_LOGO=""
 
 # ---------- device control (RS232 / IP) ----------
@@ -229,7 +229,7 @@ DEV_CMD_LABEL=(); DEV_CMD_FMT=(); DEV_CMD_PAYLOAD=(); DEV_CMD_EOL=()
 
 load_site() {
   NETKIT_SITE=""
-  SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
+  SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_SNMP_TARGET=""; SITE_MQTT=""
   SITE_SPEED_MIN=""; SITE_DNS_DOMAIN=""; SITE_HTTP_URL=""; SITE_PEER=""; SITE_LOGO=""
   local af="$NETKIT_CFG_DIR/active-site"
   [ -f "$af" ] && NETKIT_SITE="$(cat "$af" 2>/dev/null)"
@@ -240,10 +240,12 @@ load_site() {
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
     key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
+    # shellcheck disable=SC2034  # SITE_SNMP_TARGET is read by the report SNMP/PoE wiring (later task); drop this directive once a reader exists
     case "$key" in
       SMTP) SITE_SMTP="$val" ;;
       SMTP_PORT) SITE_SMTP_PORT="$val" ;;
       SNMP_COMMUNITY) SITE_SNMP_COMMUNITY="$val" ;;
+      SNMP_TARGET) SITE_SNMP_TARGET="$val" ;;
       MQTT) SITE_MQTT="$val" ;;
       SPEED_MIN) SITE_SPEED_MIN="$val" ;;
       DNS_DOMAIN) SITE_DNS_DOMAIN="$val" ;;
@@ -263,12 +265,13 @@ site_show() {
 }
 
 site_new() {
-  local name smtp port comm mqtt spd dom url peer logo
+  local name smtp port comm tgt mqtt spd dom url peer logo
   name="$(ask_req 'Site name (no spaces):' '')" || return
   name="${name// /-}"
   smtp="$(ask 'SMTP relay (blank ok):' '')"
   port="$(ask 'SMTP port:' '587')"
   comm="$(ask 'SNMP community:' 'public')"
+  tgt="$(ask 'SNMP switch IP for reports (blank ok):' '')"
   mqtt="$(ask 'MQTT broker (blank ok):' '')"
   spd="$(ask 'Min Mbps for PASS:' '900')"
   dom="$(ask 'Default DNS domain (blank ok):' '')"
@@ -280,6 +283,7 @@ site_new() {
   {
     echo "# netkit site profile: $name"
     echo "SMTP=$smtp"; echo "SMTP_PORT=$port"; echo "SNMP_COMMUNITY=$comm"
+    echo "SNMP_TARGET=$tgt"
     echo "MQTT=$mqtt"; echo "SPEED_MIN=$spd"; echo "DNS_DOMAIN=$dom"
     echo "HTTP_URL=$url"; echo "PEER=$peer"; echo "LOGO=$logo"
   } > "$f"
