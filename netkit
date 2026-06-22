@@ -481,6 +481,72 @@ devctl_live() {
   esac
 }
 
+device_new() {
+  local name tr dev baud fr host port to eol fmt
+  name="$(ask_req 'Device name (no spaces):' '')" || return
+  name="${name// /-}"
+  tr="$(menu 'Transport' 'serial|Serial (RS232)' 'tcp|TCP' 'udp|UDP')"; [ -z "$tr" ] && return
+  if [ "$tr" = serial ]; then
+    dev="$(ask 'Serial device:' '/dev/ttyUSB0')"
+    baud="$(ask_num 'Baud:' '9600')" || return
+    fr="$(ask 'Framing (8N1/8E1/7E1…):' '8N1')"
+  else
+    host="$(ask_ip 'Host IP:' "$GW")" || return
+    port="$(ask_num 'Port:' '4998')" || return
+  fi
+  to="$(ask_num 'Read timeout (s):' '2')" || return
+  eol="$(menu 'Default line ending' 'cr|CR' 'lf|LF' 'crlf|CRLF' 'none|none')"; [ -z "$eol" ] && eol=cr
+  fmt="$(menu 'Default command format' 'ascii|ASCII text' 'hex|Hex bytes')"; [ -z "$fmt" ] && fmt=ascii
+  mkdir -p "$device_dir"
+  local f="$device_dir/$name.conf"
+  {
+    echo "# netkit device profile: $name"
+    echo "TRANSPORT=$tr"
+    echo "DEV=${dev:-}"; echo "BAUD=${baud:-}"; echo "FRAMING=${fr:-}"
+    echo "HOST=${host:-}"; echo "PORT=${port:-}"
+    echo "READ_TIMEOUT=$to"; echo "EOL=$eol"; echo "FORMAT=$fmt"
+  } > "$f"
+  clear; echo "Created device: $name"; echo; cat "$f"; pause
+}
+
+device_add_cmd() { # name
+  local name="$1" label fmt payload eol
+  label="$(ask_req 'Command label:' '')" || return
+  case "$label" in *'|'*) clear; echo "Label cannot contain '|'."; pause; return ;; esac
+  fmt="$(menu 'Format' 'ascii|ASCII text' 'hex|Hex bytes')"; [ -z "$fmt" ] && return
+  payload="$(ask_req 'Payload:' '')" || return
+  case "$payload" in *'|'*) clear; echo "Payload cannot contain '|'."; pause; return ;; esac
+  if [ "$fmt" = hex ] && ! devctl_valid_hex "$payload"; then
+    clear; echo "Invalid hex (need an even count of hex digits)."; pause; return
+  fi
+  eol="$(menu 'Line ending' 'cr|CR' 'lf|LF' 'crlf|CRLF' 'none|none')"; [ -z "$eol" ] && eol="${DEV_EOL:-none}"
+  printf 'CMD=%s|%s|%s|%s\n' "$label" "$fmt" "$payload" "$eol" >> "$device_dir/$name.conf"
+  clear; echo "Added command: $label"; pause
+}
+
+device_del_cmd() { # name
+  local name="$1"; load_device "$name" || { clear; echo "No such device."; pause; return; }
+  [ "${#DEV_CMD_LABEL[@]}" -gt 0 ] || { clear; echo "No commands to remove."; pause; return; }
+  local pairs=() i
+  for i in "${!DEV_CMD_LABEL[@]}"; do pairs+=("$i|${DEV_CMD_LABEL[$i]}"); done
+  local sel; sel="$(menu 'Remove which command?' "${pairs[@]}")"; [ -z "$sel" ] && return
+  local f="$device_dir/$name.conf" tmpf; tmpf="$(mktemp)"
+  grep -v '^CMD=' "$f" > "$tmpf"
+  for i in "${!DEV_CMD_LABEL[@]}"; do
+    [ "$i" = "$sel" ] && continue
+    printf 'CMD=%s|%s|%s|%s\n' "${DEV_CMD_LABEL[$i]}" "${DEV_CMD_FMT[$i]}" \
+      "${DEV_CMD_PAYLOAD[$i]}" "${DEV_CMD_EOL[$i]}" >> "$tmpf"
+  done
+  mv "$tmpf" "$f"
+  clear; echo "Removed."; pause
+}
+
+device_delete() { # name
+  local a; a="$(ask "Delete device '$1'? (y/N):" "N")"
+  case "$a" in y|Y|yes|YES) rm -f "$device_dir/$1.conf"; clear; echo "Deleted $1."; pause ;;
+               *) clear; echo "Cancelled."; pause ;; esac
+}
+
 # ---------- categories ----------
 m_discovery() {
   local k; k="$(menu "🔍 Discovery" \
