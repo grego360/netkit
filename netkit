@@ -1616,6 +1616,14 @@ do_selftest() {
   # omping isn't in apt and has no arm64 binary — 'netkit setup' can't install it,
   # so report it honestly rather than hinting at a setup that won't help.
   if have omping; then ok "omping"; else warn "omping absent (optional; not in apt — build from source)"; fi
+  # The OT scan/sweep actions need these NSE scripts; nmap being present isn't enough.
+  # Standard Debian/RPi OS path — apt's nmap always ships them here.
+  say "OT scan scripts (nmap NSE)"
+  local ns
+  for ns in modbus-discover bacnet-info s7-info enip-info; do
+    if [ -f "/usr/share/nmap/scripts/$ns.nse" ]; then ok "$ns.nse"
+    else warn "$ns.nse missing (Modbus/BACnet scan + ICS sweep need it)"; fi
+  done
   say "Live checks"
   if [ -n "$GW" ] && ping -c1 -W2 "$GW" >/dev/null 2>&1; then ok "gateway $GW reachable"
   elif [ -n "$GW" ]; then warn "gateway $GW not answering ping"
@@ -1630,13 +1638,17 @@ do_selftest() {
 do_doctor() {
   echo "netkit doctor — checking prebuilt-binary release matchers against GitHub"
   echo
-  local i url
+  local i url bp ftype
   for i in "${!PREBUILT_REPOS[@]}"; do
     url="$(curl -fsSL "https://api.github.com/repos/${PREBUILT_REPOS[$i]}/releases/latest" 2>/dev/null \
           | jq -r '.assets[].browser_download_url' 2>/dev/null \
           | grep -Ei "${PREBUILT_RX[$i]}" | head -n1)"
     if have "${PREBUILT_BIN[$i]}"; then
-      printf '  installed  %-13s\n' "${PREBUILT_BIN[$i]}"
+      # Show the binary's arch + linking so a wrong-arch download or a surprising
+      # glibc-vs-static link (the rusty-bacnet caveat) is visible without running it.
+      bp="$(command -v "${PREBUILT_BIN[$i]}")"; ftype=""
+      have file && ftype="$(file -b "$bp" 2>/dev/null | cut -c1-46)"
+      printf '  installed  %-13s %s\n' "${PREBUILT_BIN[$i]}" "${ftype:+($ftype)}"
     elif [ -n "$url" ]; then
       printf '  resolves   %-13s -> %s\n' "${PREBUILT_BIN[$i]}" "$(basename "$url")"
     else
