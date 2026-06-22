@@ -547,6 +547,31 @@ device_delete() { # name
                *) clear; echo "Cancelled."; pause ;; esac
 }
 
+# PJLink class-1 probe (TCP 4352). On connect the projector emits a greeting line
+# ("PJLINK 0" no-auth | "PJLINK 1 <nonce>" auth) BEFORE accepting a command — it must
+# be skipped, else it's mistaken for the response. v1 = unauthenticated projectors only.
+pjlink_probe() {
+  require socat socat || return
+  local host; host="$(ask_ip 'Projector IP:' "$GW")" || return
+  local greet
+  greet="$(printf '' | socat -T2 -t0 - TCP:"$host":4352 2>/dev/null | head -n1)"
+  if [ -z "$greet" ]; then
+    clear; echo "No response from $host:4352 (not a PJLink device, or unreachable)."; pause; return
+  fi
+  case "$greet" in
+    "PJLINK 1"*) clear; echo "Projector requires PJLink authentication — not supported in v1."; pause; return ;;
+  esac
+  local q line out=""
+  for q in POWR INPT AVMT LAMP NAME INF1 CLSS; do
+    line="$({ sleep 0.2; printf '%%1%s ?\r' "$q"; } | socat -T2 -t0 - TCP:"$host":4352 2>/dev/null | grep '^%1' | head -n1)"
+    out="$out$(printf '%-5s %s' "$q" "${line:-<no reply>}")"$'\n'
+  done
+  NETKIT_LAST_OUTPUT="$out"
+  clear
+  printf 'PJLink probe — %s (TCP 4352)\n------------------------------------------\n%s' "$host" "$out"
+  pause
+}
+
 # ---------- categories ----------
 m_discovery() {
   local k; k="$(menu "🔍 Discovery" \
