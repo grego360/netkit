@@ -1072,7 +1072,15 @@ m_avoip() {
               local self peer; self="$(ask_req "This device IP:" "${SELFIP:-}")" || return
               peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || return
               run omping "$self" "$peer"
-            else clear; echo "omping not installed (best-effort; may be absent in apt)."; echo "Single-device checks above still work."; pause; fi ;;
+            else clear
+              echo "omping isn't installed — and it can't be auto-installed:"
+              echo "  • not in Debian/Raspberry Pi OS apt"
+              echo "  • ships only as source (no arm64 binary), and netkit never compiles on the Pi"
+              echo "To use this 2-device multicast test, build it yourself:"
+              echo "  github.com/troglobit/omping  (make && sudo make install)"
+              echo
+              echo "The single-device multicast checks above (IGMP, groups, joined) still work."
+              pause; fi ;;
     ptpwatch) run sudo tcpdump -i "$IFACE" -n -v udp port 319 or udp port 320 ;;
     ptpmon) require ptp4l linuxptp || return
             clear
@@ -1558,10 +1566,14 @@ do_setup() {
 
   say "Installing AV/IPv6 extras (best-effort; skipped if not in apt)"
   local p
-  for p in omping linuxptp ndisc6; do
+  for p in linuxptp ndisc6; do
     if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "$p" >/dev/null 2>&1; then ok "$p"
     else warn "$p unavailable in apt — skipped"; fi
   done
+  # omping (2-device multicast flow test) is not in Bookworm apt and ships only as
+  # source (no arm64 binary), so netkit can't auto-install it under the no-compile
+  # rule. The AV-over-IP menu still offers it if you install it yourself.
+  have omping || echo "    omping (optional multicast flow test): not in apt — build from source if needed (github.com/troglobit/omping)"
 
   if getent group bluetooth >/dev/null 2>&1; then
     sudo usermod -aG bluetooth "$USER" 2>/dev/null \
@@ -1596,11 +1608,14 @@ do_selftest() {
   say "Optional extras"
   local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
                   ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
-                  omping ptp4l rdisc6 tio socat xxd
+                  ptp4l rdisc6 tio socat xxd
                   mbpoll knxtool bacnet)
   for x in "${extras[@]}"; do
     if have "$x"; then ok "$x"; else warn "$x missing (run: netkit setup)"; fi
   done
+  # omping isn't in apt and has no arm64 binary — 'netkit setup' can't install it,
+  # so report it honestly rather than hinting at a setup that won't help.
+  if have omping; then ok "omping"; else warn "omping absent (optional; not in apt — build from source)"; fi
   say "Live checks"
   if [ -n "$GW" ] && ping -c1 -W2 "$GW" >/dev/null 2>&1; then ok "gateway $GW reachable"
   elif [ -n "$GW" ]; then warn "gateway $GW not answering ping"
