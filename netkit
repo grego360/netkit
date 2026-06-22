@@ -191,6 +191,12 @@ NETKIT_SITE=""
 SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
 SITE_SPEED_MIN=""; SITE_DNS_DOMAIN=""; SITE_HTTP_URL=""; SITE_PEER=""; SITE_LOGO=""
 
+# ---------- device control (RS232 / IP) ----------
+device_dir="$NETKIT_CFG_DIR/devices"
+DEV_TRANSPORT=""; DEV_DEV=""; DEV_BAUD=""; DEV_FRAMING=""
+DEV_HOST=""; DEV_PORT=""; DEV_READ_TIMEOUT=""; DEV_EOL=""; DEV_FORMAT=""
+DEV_CMD_LABEL=(); DEV_CMD_FMT=(); DEV_CMD_PAYLOAD=(); DEV_CMD_EOL=()
+
 load_site() {
   NETKIT_SITE=""
   SITE_SMTP=""; SITE_SMTP_PORT=""; SITE_SNMP_COMMUNITY=""; SITE_MQTT=""
@@ -353,6 +359,31 @@ WIRED="$(for d in /sys/class/net/*; do
   [ -e "$d/wireless" ] && continue
   [ -e "$d/device" ] && { echo "$n"; break; }
 done)"
+
+# ---------- device-control helpers ----------
+# framing_socat 8N1 -> "cs8,parenb=0,cstopb=0"  (rc 1 on bad framing)
+framing_socat() {
+  local f="$1" bits par stop out
+  case "$f" in [78][NEOneo][12]) ;; *) return 1 ;; esac
+  bits="${f:0:1}"; par="${f:1:1}"; stop="${f:2:1}"
+  out="cs$bits"
+  case "$par" in
+    N|n) out="$out,parenb=0" ;;
+    E|e) out="$out,parenb=1,parodd=0" ;;
+    O|o) out="$out,parenb=1,parodd=1" ;;
+  esac
+  case "$stop" in 1) out="$out,cstopb=0" ;; 2) out="$out,cstopb=1" ;; esac
+  printf '%s' "$out"
+}
+
+# framing_tio 8N1 -> "-d 8 -p none -s 1"  (rc 1 on bad framing)
+framing_tio() {
+  local f="$1" bits par stop p
+  case "$f" in [78][NEOneo][12]) ;; *) return 1 ;; esac
+  bits="${f:0:1}"; par="${f:1:1}"; stop="${f:2:1}"
+  case "$par" in N|n) p=none ;; E|e) p=even ;; O|o) p=odd ;; esac
+  printf '%s' "-d $bits -p $p -s $stop"
+}
 
 # ---------- categories ----------
 m_discovery() {
