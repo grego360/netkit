@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.1.1"
+NETKIT_VERSION="4.2.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -1339,7 +1339,7 @@ do_setup() {
   sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
-              bluez bluez-tools rtl-433 rtl-sdr swaks)
+              bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"
@@ -1357,6 +1357,12 @@ do_setup() {
   if getent group bluetooth >/dev/null 2>&1; then
     sudo usermod -aG bluetooth "$USER" 2>/dev/null \
       && ok "added $USER to 'bluetooth' group (log out/in to apply)"
+  fi
+
+  if getent group dialout >/dev/null 2>&1; then
+    sudo usermod -aG dialout "$USER" 2>/dev/null \
+      && ok "added $USER to 'dialout' group (serial port access)"
+    echo "    (log out/in, or run 'newgrp dialout', for serial access to take effect)"
   fi
 
   say "Fetching prebuilt aarch64 binaries (GitHub latest releases)"
@@ -1381,7 +1387,7 @@ do_selftest() {
   say "Optional extras"
   local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk fping
                   ipcalc wakeonlan bluetoothctl btmon rtl_433 rtl_power swaks
-                  omping ptp4l rdisc6)
+                  omping ptp4l rdisc6 tio socat xxd)
   for x in "${extras[@]}"; do
     if have "$x"; then ok "$x"; else warn "$x missing (run: netkit setup)"; fi
   done
