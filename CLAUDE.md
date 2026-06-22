@@ -26,6 +26,7 @@ Both must produce **zero output** before delivering:
 ```bash
 bash -n netkit                    # syntax check
 shellcheck -s bash netkit         # lint
+bash tests/run.sh                 # off-hardware unit tests (pure helpers)
 ```
 
 Say explicitly that it was linted. Targeted `# shellcheck disable=SCxxxx` is allowed
