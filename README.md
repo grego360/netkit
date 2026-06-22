@@ -76,8 +76,9 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
   `~/.config/netkit/`; reports under `~/netkit-reports/`.
 - **Connectivity:** WiFi (`wlan0`) and/or wired (`eth0`); netkit re-detects the
   active interface each launch.
-- **Status bar:** shows iface / IP / gateway / WiFi / active site, plus a
-  `bat: NN%` readout when a UPS/HAT exposes a battery via `/sys/class/power_supply`.
+- **Status bar:** shows iface / IP / gateway / WiFi / active site, a green ● / red ●
+  gateway-reachability dot (cached ~15s so redraws stay snappy), plus a `bat: NN%`
+  readout when a UPS/HAT exposes a battery via `/sys/class/power_supply`.
 
 ---
 
