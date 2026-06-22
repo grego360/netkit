@@ -1072,6 +1072,31 @@ snmp_poe() {
   else echo "  (no POWER-ETHERNET-MIB data — not a PoE switch, or it uses a vendor MIB)"; fi
 }
 
+# snmp_report_block <host> <community> -> markdown switch section on stdout (v2c).
+# Empty host -> nothing. Never aborts the caller; never leaks stderr. Reuses
+# snmp_if_table + snmp_poe (both read G_SNMP_ARGS and print plain text).
+# shellcheck disable=SC2016  # printf formats are single-quoted ON PURPOSE: the ``` fences must stay literal, values pass via %s
+snmp_report_block() {
+  local h="$1" comm="${2:-public}"
+  [ -n "$h" ] || return 0
+  if ! have snmpwalk; then
+    printf '## Switch (SNMP)\n```\nsnmp tools not installed (run: netkit setup)\n```\n'
+    return 0
+  fi
+  G_SNMP_ARGS=(-v2c -c "$comm" -t 2 -r 1)
+  unset SNMPCONFPATH 2>/dev/null || true   # drop the v3 conf in NETKIT_CFG_DIR off the search path (the -v2c flag forces the version)
+  if ! snmpget "${G_SNMP_ARGS[@]}" "$h" 1.3.6.1.2.1.1.5.0 >/dev/null 2>&1; then
+    printf '## Switch %s (SNMP v2c)\n```\nno SNMP response (check IP / community / v2c enabled)\n```\n' "$h"
+    return 0
+  fi
+  local sys ifs poe
+  sys="$(snmpwalk "${G_SNMP_ARGS[@]}" "$h" 1.3.6.1.2.1.1 2>/dev/null)"
+  ifs="$(snmp_if_table "$h" 2>/dev/null)"
+  poe="$(snmp_poe "$h" 2>/dev/null)"
+  printf '## Switch %s (SNMP v2c)\n\n### System\n```\n%s\n```\n\n### Interfaces\n```\n%s\n```\n\n### PoE\n```\n%s\n```\n' \
+    "$h" "$sys" "$ifs" "$poe"
+}
+
 snmp_rate() {
   local h="$1" idx
   idx="$(ask_num "ifIndex (from the Interfaces list):" "")" || return
