@@ -69,6 +69,7 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    `~/.config/netkit/sites/<name>.conf`. `load_site` is a **whitelist `key=value`
    parser** — the `.conf` is *never* sourced/executed (security boundary; don't replace
    it with `source`). Fields populate `SITE_*` globals consumed by menu actions.
+   Whitelisted keys include `SNMP_TARGET` (switch IP for the report SNMP/PoE section).
 4. **Live network facts** (~line 225–241) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
    `WIRED` detected at launch from `ip`/sysfs. Re-detected every run; menus read these.
 5. **Category menus** `m_*` (~line 244–719) — one function per dashboard category
