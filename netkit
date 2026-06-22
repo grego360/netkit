@@ -186,6 +186,7 @@ spin() {
 # the screen else page it. Captures stdout+stderr — NEVER use on an interactive /
 # streaming TUI (capturing would corrupt it). Retains output for save_last_report.
 NETKIT_LAST_OUTPUT=""
+RP_HOST=""; RP_COMM=""   # interactive report SNMP target (set by report_snmp_prompt)
 page() {
   clear; printf '$ %s\n%s\n' "$*" "------------------------------------------"
   # Prime sudo first so a password prompt shows on the tty rather than being
@@ -240,7 +241,6 @@ load_site() {
   while IFS= read -r line; do
     case "$line" in ''|\#*) continue ;; esac
     key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
-    # shellcheck disable=SC2034  # SITE_SNMP_TARGET is read by the report SNMP/PoE wiring (later task); drop this directive once a reader exists
     case "$key" in
       SMTP) SITE_SMTP="$val" ;;
       SMTP_PORT) SITE_SMTP_PORT="$val" ;;
@@ -1346,6 +1346,17 @@ bt_neighbourhood() {       # markdown-friendly block for reports; never prompts 
   printf '%s\n' "$out" | bt_table
 }
 
+# report_snmp_prompt — interactive: set RP_HOST (blank = skip) + RP_COMM, prefilled
+# from the active site. Used by the snapshot/sweep menu actions only; CLI/Quick
+# pass site defaults silently.
+report_snmp_prompt() {
+  RP_HOST="$(ask 'Switch IP for SNMP/PoE (blank = skip):' "${SITE_SNMP_TARGET:-}")"
+  RP_COMM="${SITE_SNMP_COMMUNITY:-public}"
+  [ -z "$RP_HOST" ] && return
+  RP_COMM="$(ask 'SNMP community:' "${SITE_SNMP_COMMUNITY:-public}")"
+  [ -z "$RP_COMM" ] && RP_COMM=public
+}
+
 m_report() {
   while true; do
     local k; k="$(menu "📊 Reporting" \
@@ -1356,8 +1367,8 @@ m_report() {
       "rec|Record terminal session (asciinema)" \
       "back|‹ back")"
     case "$k" in
-      snap) gen_report ;;
-      sweep) gen_sweep ;;
+      snap) report_snmp_prompt; gen_report "$RP_HOST" "$RP_COMM" ;;
+      sweep) report_snmp_prompt; gen_sweep "$RP_HOST" "$RP_COMM" ;;
       savelast) save_last_report ;;
       vnstat) run vnstat ;;
       rec) local f; f="$(report_dir)/session-$(date +%Y%m%d-%H%M).cast"; run asciinema rec "$f" ;;
@@ -2002,7 +2013,7 @@ quick_run() {
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
     btscan)   bt_scan ;;
     selftest) clear; do_selftest; pause ;;
-    sweep)    gen_sweep ;;
+    sweep)    gen_sweep "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}" ;;
     *) : ;;
   esac
 }
@@ -2076,8 +2087,8 @@ load_site
 
 case "${1:-}" in
   dash) run_dash; exit 0 ;;
-  report) gen_report; exit 0 ;;
-  sweep) gen_sweep; exit 0 ;;
+  report) gen_report "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}"; exit 0 ;;
+  sweep) gen_sweep "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}"; exit 0 ;;
   setup|--setup) do_setup; exit 0 ;;
   selftest|--selftest) do_selftest; exit 0 ;;
   doctor|--doctor) do_doctor; exit 0 ;;
