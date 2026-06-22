@@ -10,7 +10,7 @@ copying that one file to `/usr/local/bin/netkit` and marking it executable.
 The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 `netkit setup`.
 
-**Current version: 4.2.1**
+**Current version: 4.3.0**
 
 ---
 
@@ -50,9 +50,11 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 - `ask <prompt> <default>` / `ask_req …` (aborts on empty) / `ask_pw <prompt>` (hidden)
 - `ask_num` / `ask_ip` / `ask_cidr` — validating prompts (loop until valid or cancelled)
 - `pause` — "Enter to return"
-- `run <cmd> …` — clears, echoes `$ …`, runs `"$@"`, pauses. **Do not pipe/tee
-  interactive TUIs through this** — it would corrupt them.
-- `runsh "<string>"` — same but via `bash -c` (for shell syntax / filters)
+- `run <cmd> …` — clears, echoes `$ …`, runs `"$@"`, pauses. **Always array-form
+  (`run cmd arg …`), never a shell string** — there is deliberately no `runsh`/`bash -c`
+  wrapper (it invited command injection from prompt input). When a redirect or compound
+  command is genuinely needed, write an inline `clear`/`echo`/`cmd`/`pause` block with
+  quoted args. **Do not pipe/tee interactive TUIs through `run`** — it would corrupt them.
 - `page <cmd> …` — like `run` but captures finite output and shows it through a pager
   when it overflows the screen. **Batch commands only** — never an interactive TUI
   (it captures stdout/stderr). Retains output for Reporting → "Save last output".
@@ -118,7 +120,7 @@ page. If `head -1` shows HTML or a tiny line count, you grabbed the web page.
 ```bash
 netkit setup        # apt packages + prebuilt aarch64 binaries
 netkit selftest     # confirm tools present + gateway/subnet reachable
-netkit doctor       # confirm the 4 GitHub binary matchers still resolve
+netkit doctor       # confirm the 5 GitHub binary matchers still resolve
 ```
 
 ---
@@ -214,7 +216,7 @@ drive its send+read and interactive IP sessions.
 **apt (best-effort — skipped cleanly if not in the repo):**
 `omping linuxptp ndisc6`
 
-**Prebuilt aarch64 GitHub release binaries:** `librespeed-cli gping bandwhich xh`
+**Prebuilt aarch64 GitHub release binaries:** `librespeed-cli gping bandwhich xh bacnet`
 — resolved by a shared matcher registry (`PREBUILT_*` arrays) used by both
 `setup` and `doctor`. If a project renames its release asset, the fix is a
 one-line regex update for that tool; netkit falls back to its base tool meanwhile.
