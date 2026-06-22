@@ -436,6 +436,51 @@ load_device() {
 device_list() { find "$device_dir" -maxdepth 1 -name '*.conf' -printf '%f\n' 2>/dev/null | sed 's/\.conf$//'; }
 device_show_file() { cat "$device_dir/$1.conf" 2>/dev/null; }
 
+# devctl_addr transport a b [c] -> socat address.  serial: dev baud framing | ip: host port.
+# All serial boolean options are explicit (=0/=1): bare names only ENABLE, leaving the
+# disabled case in an undefined prior state. 'rawer' (not obsolete 'raw').
+devctl_addr() {
+  case "$1" in
+    serial) local fr; fr="$(framing_socat "$4")" || return 1
+            printf '%s,b%s,rawer,echo=0,clocal=1,%s,crtscts=0' "$2" "$3" "$fr" ;;
+    tcp)    printf 'TCP:%s:%s' "$2" "$3" ;;
+    udp)    printf 'UDP:%s:%s' "$2" "$3" ;;
+    *)      return 1 ;;
+  esac
+}
+
+# devctl_pipe fmt payload eol timeout addr  — streamed emit|socat; run UNDER page (ascii reply).
+# -T<N> = inactivity/read timeout (send, then read reply up to N s, exit). -t0 = drain on EOF.
+devctl_pipe() {
+  devctl_emit "$1" "$2" "$3" | socat -T"$4" -t0 - "$5"
+}
+
+# devctl_send transport addr fmt payload eol timeout
+# ascii -> page (text reply, capture-safe). hex -> tmpfile + xxd (binary reply, NUL-safe).
+devctl_send() {
+  local fmt="$3" payload="$4" eol="$5" to="$6" addr="$2"
+  if [ "$fmt" = hex ]; then
+    local tmpf; tmpf="$(mktemp)"
+    devctl_emit "$fmt" "$payload" "$eol" | socat -T"$to" -t0 - "$addr" >"$tmpf" 2>/dev/null
+    if [ -s "$tmpf" ]; then page xxd "$tmpf"
+    else clear; echo "No reply bytes (device may be write-only, or check wiring/addr)."; pause; fi
+    rm -f "$tmpf"
+  else
+    page devctl_pipe "$fmt" "$payload" "$eol" "$to" "$addr"
+  fi
+}
+
+# devctl_live transport a b [c]  — interactive session (owns terminal -> run, never page).
+devctl_live() {
+  case "$1" in
+    serial) require tio tio || return
+            local ta; read -ra ta <<< "$(framing_tio "$4")"
+            run tio "$2" -b "$3" "${ta[@]}" -f none ;;
+    tcp)    require ncat ncat || return; run ncat "$2" "$3" ;;
+    udp)    require ncat ncat || return; run ncat -u "$2" "$3" ;;
+  esac
+}
+
 # ---------- categories ----------
 m_discovery() {
   local k; k="$(menu "🔍 Discovery" \
