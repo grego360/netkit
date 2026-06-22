@@ -1287,6 +1287,7 @@ bacnet_write() {
 # Run discovery and read/write sequentially — both bind local UDP 47808.
 m_bacnet() {
   need_iface || return
+  [ -n "$SELFIP" ] || { clear; echo "No local IPv4 address — BACnet needs a bound source address (check link/DHCP)."; pause; return; }
   local k; k="$(menu "🏢 BACnet/IP ($IFACE)" \
     "nmap|Discover devices (nmap, no setup needed)" \
     "whois|Discover devices (WhoIs, rusty-bacnet)" \
@@ -1525,7 +1526,7 @@ do_setup() {
     echo "Run 'netkit setup' as your normal user (it calls sudo where needed)."; exit 1
   fi
   sudo -v 2>/dev/null || warn "sudo unavailable — apt steps may fail"
-  say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail…)"
+  say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
               bluez bluez-tools rtl-433 rtl-sdr swaks tio xxd
               mbpoll knxd-tools)
