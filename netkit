@@ -2083,6 +2083,10 @@ first_run_check() {
 }
 
 # ---------- main ----------
+# Tests source this file with NETKIT_LIB=1 to load functions without running the
+# dashboard or any subcommand. Must be the && short-circuit form: a bare top-level
+# `return` would runtime-error on normal execution.
+[ "${NETKIT_LIB:-0}" = 1 ] && return 0
 load_site
 
 case "${1:-}" in
