@@ -152,18 +152,32 @@ wired in.)
 ### 4.7 PJLink probe
 
 On TCP connect the projector first emits a greeting line (`PJLINK 0\r`, or
-`PJLINK 1 <nonce>\r` when auth is enabled) **before** accepting a command — it must
-be discarded, else it is mistaken for the response. The mandatory space before `?`
-is preserved. Per-query, one connection:
+`PJLINK 1 <nonce>\r` when auth is enabled) **before** accepting a command — it
+precedes the reply on every connection and must not be mistaken for the response.
+The mandatory space before `?` is preserved. Per-query, **one connection** — the
+conservative choice that works whether or not the projector keeps the session open
+(some gear accepts only one command per connection):
 
 ```bash
-{ sleep 0.2; printf '%%1POWR ?\r'; } | socat -T2 -t0 - TCP:"$host":4352 | grep '^%1'
+raw="$({ sleep 0.2; printf '%%1POWR ?\r'; } | socat -T2 -t0 - TCP:"$host":4352)"
+printf '%s\n' "$raw" | tr '\r' '\n' | grep '^%1' | head -n1
 ```
+
+Two correctness details learned in review/verification, baked into the
+implementation:
+
+- **CR line endings.** PJLink terminates lines with `\r`, not `\n`, so the whole
+  reply is a single `\n`-line beginning `PJLINK …` — `grep '^%1'` would never match.
+  Translate `\r`→`\n` (`tr '\r' '\n'`) before `grep`.
+- **No separate greeting probe.** Auth is detected **inline on the first query's raw
+  output** (`case "$raw" in *"PJLINK 1"*) …`) rather than opening an extra
+  send-nothing connection. One fewer connection, and avoids projectors that error on
+  a command-less session.
 
 Loop a small class-1 query set — `POWR INPT AVMT LAMP NAME INF1 CLSS` — accumulate
 output, `page` the result. **v1 handles unauthenticated (auth-disabled) projectors
-only**; an authenticated greeting (`PJLINK 1 …`) is detected and reported as
-"auth required — not supported in v1."
+only**; an authenticated greeting (`PJLINK 1 …`) is detected on the first query and
+reported as "auth required — not supported in v1."
 
 ## 5. Saved device library
 
