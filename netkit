@@ -1180,10 +1180,12 @@ ot_sweep() {
 m_ot() {
   local k; k="$(menu "🏭 Building / OT" \
     "modbus|Modbus (scan / read / write)" \
+    "bacnet|BACnet/IP (discover / read / write)" \
     "sweep|ICS/OT fingerprint sweep (nmap: S7/Modbus/EtherNet-IP/BACnet)" \
     "back|‹ back")"
   case "$k" in
     modbus) m_modbus ;;
+    bacnet) m_bacnet ;;
     sweep) ot_sweep ;;
     *) return ;;
   esac
@@ -1255,6 +1257,49 @@ m_modbus() {
             --script-args modbus-discover.aggressive=true "$n" ;;
     read) modbus_rw read ;;
     write) modbus_rw write ;;
+    *) return ;;
+  esac
+}
+
+bacnet_read() {
+  local tgt obj prop
+  tgt="$(ask_req "Device (IP or instance):" "")" || return
+  obj="$(ask_req "Object (e.g. ai:1 or analog-input,0):" "")" || return
+  prop="$(ask_req "Property (e.g. pv):" "pv")" || return
+  page bacnet -i "$SELFIP" read "$tgt" "$obj" "$prop"
+}
+
+bacnet_write() {
+  local tgt obj prop val pri a
+  tgt="$(ask_req "Device (IP or instance):" "")" || return
+  obj="$(ask_req "Object (e.g. av:1):" "")" || return
+  prop="$(ask_req "Property (e.g. pv):" "pv")" || return
+  val="$(ask_req "Value to write:" "")" || return
+  pri="$(ask_num "Priority (1-16):" "8")" || return
+  a="$(ask "Write '$val' to $tgt $obj $prop @prio $pri? (y/N):" "N")"
+  case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+  page bacnet -i "$SELFIP" write "$tgt" "$obj" "$prop" "$val" --priority "$pri"
+}
+
+# Discovery via nmap needs no setup; WhoIs/read/write need the rusty-bacnet binary.
+# Run discovery and read/write sequentially — both bind local UDP 47808.
+m_bacnet() {
+  need_iface || return
+  local k; k="$(menu "🏢 BACnet/IP ($IFACE)" \
+    "nmap|Discover devices (nmap, no setup needed)" \
+    "whois|Discover devices (WhoIs, rusty-bacnet)" \
+    "read|Read a property" \
+    "write|Write a property" \
+    "back|‹ back")"
+  case "$k" in
+    nmap) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return
+          page sudo nmap -sU -p47808 --open --script bacnet-info "$n" ;;
+    whois) require bacnet "bacnet (rusty-bacnet)" || return
+           local r; r="$(ask "Instance range (blank = all, e.g. 1-4000):" "")"
+           if [ -n "$r" ]; then page bacnet -i "$SELFIP" discover "$r"
+           else page bacnet -i "$SELFIP" discover; fi ;;
+    read) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_read ;;
+    write) require bacnet "bacnet (rusty-bacnet)" || return; bacnet_write ;;
     *) return ;;
   esac
 }
