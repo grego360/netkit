@@ -19,6 +19,14 @@ NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
 site_dir="$NETKIT_CFG_DIR/sites"
 bt_cache="$NETKIT_CFG_DIR/last-bt-scan"   # last Bluetooth scan (MAC|name|rssi|type lines)
 
+# Debian (Trixie included) leaves the sbin dirs off a normal user's PATH, yet
+# arp-scan, ethtool, rfkill, iw, lldpcli and ptp4l live there. Append them so
+# `have` and every unprivileged call see the same tools sudo does.
+for _d in /usr/local/sbin /usr/sbin /sbin; do
+  case ":$PATH:" in *":$_d:"*) ;; *) PATH="$PATH:$_d" ;; esac
+done; unset _d
+export PATH
+
 # ---------- helpers ----------
 have() { command -v "$1" >/dev/null 2>&1; }
 

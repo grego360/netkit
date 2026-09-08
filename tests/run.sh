@@ -217,6 +217,17 @@ test_confirm() {
   confirm "Go?" <<<"Ny";  assert_rc 1 "$?" "confirm: stray text -> no"
 }
 
+test_sbin_on_path() {
+  # Debian Trixie leaves /usr/sbin off a normal user's PATH; arp-scan, ethtool,
+  # rfkill, iw, lldpcli, ptp4l live there, so netkit must add it itself.
+  # PATH is set as a separate statement: a prefix on `source` does not persist.
+  local out; out="$( PATH=/usr/local/bin:/usr/bin:/bin; NETKIT_LIB=1 source ./netkit; echo ":$PATH:" )"
+  case "$out" in *:/usr/sbin:*) printf '  ok: %s\n' "sbin: /usr/sbin appended to PATH on load" ;; *) printf '  FAIL: sbin: /usr/sbin missing from PATH (%s)\n' "$out"; echo x >>"$fails" ;; esac
+  case "$out" in *:/sbin:*)     printf '  ok: %s\n' "sbin: /sbin appended to PATH on load" ;;     *) printf '  FAIL: sbin: /sbin missing from PATH (%s)\n' "$out"; echo x >>"$fails" ;; esac
+  out="$( PATH=/usr/sbin:/usr/bin; NETKIT_LIB=1 source ./netkit; echo "$PATH" )"
+  assert_eq "/usr/sbin:/usr/bin:/usr/local/sbin:/sbin" "$out" "sbin: dirs already present are not duplicated"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -234,6 +245,7 @@ run_test test_autostart_block
 run_test test_run_dash_nested
 run_test test_hw_check
 run_test test_confirm
+run_test test_sbin_on_path
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
