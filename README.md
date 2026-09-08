@@ -194,6 +194,8 @@ netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan�
 netkit doctor        check prebuilt-binary matchers vs GitHub
 netkit site [name]   site profiles (prefill prompts per location)
 netkit autostart on|off   boot the unit straight into netkit
+netkit brand [name]  show / set the brand shown above netKit (menus, launch splash)
+netkit splash [off]  install the brand as the plymouth boot splash / restore Pi OS's
 netkit update [URL]  re-pull this script from a Raw gist URL
 netkit uninstall     remove the netkit binary
 netkit version       print version
@@ -334,6 +336,13 @@ folder.
   list, banner only on terminals ≥ 40 rows; tmux's status bar is hidden under 40
   rows. `netkit autostart on` is idempotent — re-run it after upgrading to refresh
   the launcher block. The VT/console fallback stays at the stock 8x16 font (80x30).
+- **Branding.** `~/.config/netkit/netkit.conf` (`BRAND=Modal AV`, whitelist-parsed
+  like site profiles, never sourced) sets the integrator/customer name shown above
+  the fixed **netKit** wordmark: on every menu's top line (or in the banner box on
+  tall terminals), on the launch splash (figlet when installed, plain text
+  otherwise), and — via `netkit splash` / System → Branding — as the plymouth boot
+  splash (ImageMagick renders a 640x480 PNG, the theme copies Pi OS's pix scaling
+  script; `netkit splash off` restores pix). netKit itself is not configurable.
 - **Long output scrolls, it doesn't fly past.** Finite commands (arp-scan, nmap,
   iw scan, ethtool, dig, swaks, …) go through `page`, which shows the output inline
   when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Actions that

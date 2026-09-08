@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.5.0"
+NETKIT_VERSION="4.6.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -78,12 +78,13 @@ require() {
 }
 
 banner() {
+  local top="netKit  v${NETKIT_VERSION}" sub="network toolkit"
+  [ -n "${NETKIT_BRAND:-}" ] && { top="$NETKIT_BRAND"; sub="netKit  v${NETKIT_VERSION}"; }
   if have gum; then
     gum style --border rounded --padding "0 2" \
-      --border-foreground "$C_ACCENT" --foreground "$C_ACCENT" \
-      "netkit  v${NETKIT_VERSION}" "network toolkit"
+      --border-foreground "$C_ACCENT" --foreground "$C_ACCENT" "$top" "$sub"
   else
-    echo "== netkit v${NETKIT_VERSION} =="
+    echo "== $top · $sub =="
   fi
 }
 
@@ -92,7 +93,7 @@ banner() {
 # [banner, tall terminals only] + status line + blank + gum header + list + footer.
 menu_show_banner() { [ "${1:-0}" -ge 40 ]; }          # menu_show_banner <rows>
 menu_height() {                                        # menu_height <rows> <banner 0|1>
-  local h=$(( ${1:-24} - 6 )); [ "${2:-0}" = 1 ] && h=$(( h - 5 ))
+  local h=$(( ${1:-24} - 7 )); [ "${2:-0}" = 1 ] && h=$(( h - 4 ))   # brand line, or the 4-row banner box instead
   [ "$h" -gt 24 ] && h=24; [ "$h" -lt 5 ] && h=5
   echo "$h"
 }
@@ -133,7 +134,7 @@ menu() {
   h="$(menu_height "$rows" "$show_banner")"
   if have gum; then
     while :; do
-      { clear; [ "$show_banner" = 1 ] && banner; status_line; echo; } >&2
+      { clear; if [ "$show_banner" = 1 ]; then banner; else brand_line; fi; status_line; echo; } >&2
       chosen="$(printf '%s\n' "${labels[@]}" | \
         GUM_CHOOSE_CURSOR="$G_CUR" \
         GUM_CHOOSE_CURSOR_FOREGROUND="$C_ACCENT" \
@@ -349,6 +350,155 @@ load_site() {
       *) : ;;
     esac
   done < "$cf"
+}
+
+# ---------- unit settings (branding) ----------
+# ~/.config/netkit/netkit.conf — per-unit, not per-site. Same whitelist key=value
+# parser as load_site: the file is never sourced. BRAND is the customer / integrator
+# name shown above the fixed "netKit" wordmark (launch splash, boot splash, every
+# menu's top line). netKit itself is not configurable.
+NETKIT_BRAND=""
+settings_file() { echo "$NETKIT_CFG_DIR/netkit.conf"; }
+load_settings() {
+  NETKIT_BRAND=""
+  local cf; cf="$(settings_file)"
+  [ -f "$cf" ] || return 0
+  local line key val
+  while IFS= read -r line; do
+    case "$line" in ''|\#*) continue ;; esac
+    key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
+    case "$key" in
+      BRAND) NETKIT_BRAND="$val" ;;
+      *) : ;;
+    esac
+  done < "$cf"
+}
+# brand_valid <text>: printable, no '|' (menu separator), <= 32 chars; empty = clear.
+brand_valid() {
+  [ "${#1}" -le 32 ] || return 1
+  case "$1" in *'|'*) return 1 ;; esac
+  LC_ALL=C printf '%s' "$1" | grep -q '[^[:print:]]' && return 1
+  return 0
+}
+# set_brand <text>: rewrite the BRAND line (file created if needed), reload.
+set_brand() {
+  brand_valid "$1" || { echo "Brand must be printable, no '|', max 32 chars."; return 1; }
+  local cf; cf="$(settings_file)"
+  mkdir -p "${cf%/*}"
+  { [ -f "$cf" ] && grep -v '^BRAND=' "$cf"; echo "BRAND=$1"; } > "$cf.tmp" && mv "$cf.tmp" "$cf"
+  load_settings
+  echo "Brand set to: ${NETKIT_BRAND:-<none>}"
+}
+
+# logo_text [cols]: the wordmark as text. Brand big (figlet when installed, plain
+# otherwise) with "netKit vX" under it; without a brand, netKit is the big line.
+logo_text() {
+  local cols="${1:-80}" big sub
+  if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit v${NETKIT_VERSION}"
+  else big="netKit"; sub="v${NETKIT_VERSION} · network toolkit"; fi
+  if have figlet; then
+    local font=standard; [ "$cols" -lt 80 ] && font=small
+    figlet -w "$cols" -f "$font" -- "$big" 2>/dev/null || printf '%s\n' "$big"
+  else
+    printf '%s\n' "$big"
+  fi
+  printf '%s\n' "$sub"
+}
+# brand_line: one-line brand · netKit header used above the status line on menus
+# that are too short for the boxed banner.
+brand_line() {
+  if [ -n "$NETKIT_BRAND" ]; then printf ' %s%s%s %s· netKit v%s%s\n' "$C_HDR" "$NETKIT_BRAND" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"
+  else printf ' %snetKit%s %sv%s · network toolkit%s\n' "$C_HDR" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"; fi
+}
+# splash_screen: full-screen wordmark for a moment at launch (interactive only).
+splash_screen() {
+  [ -t 1 ] || return 0
+  local cols; cols="$(tput cols 2>/dev/null || echo 80)"
+  clear
+  if have gum; then
+    logo_text "$cols" | gum style --foreground "$C_ACCENT" --align center --width "$cols" --margin "2 0"
+  else
+    echo; logo_text "$cols"
+  fi
+  sleep "${NETKIT_SPLASH_SECS:-1.2}"
+}
+
+# ---------- boot splash (plymouth) ----------
+# A theme is a descriptor + a script that scales splash.png to the screen (same
+# logic as Raspberry Pi OS's "pix" theme). splash_png renders the wordmark with
+# ImageMagick's caption: so any brand length fits the 560px box.
+splash_png() {   # splash_png <out.png>
+  local im; if have magick; then im=magick; elif have convert; then im=convert; else return 1; fi
+  local big sub
+  if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit"; else big="netKit"; sub="network toolkit"; fi
+  "$im" -background black \
+    \( -size 560x170 -gravity center -fill white -font DejaVu-Sans-Bold caption:"$big" \) \
+    \( -size 560x20 xc:black \) \
+    \( -size 560x80 -gravity center -fill "$C_ACCENT" -font DejaVu-Sans caption:"$sub" \) \
+    -append -gravity center -background black -extent 640x480 "$1"
+}
+plymouth_theme_write() {   # plymouth_theme_write <theme dir> <splash.png>
+  local dir="$1" png="$2"
+  mkdir -p "$dir" && cp "$png" "$dir/splash.png" || return 1
+  cat > "$dir/netkit.plymouth" <<PLY
+[Plymouth Theme]
+Name=netkit
+Description=netKit branded boot splash
+ModuleName=script
+
+[script]
+ImageDir=$dir
+ScriptFile=$dir/netkit.script
+PLY
+  cat > "$dir/netkit.script" <<'PLYS'
+// netkit boot splash: show splash.png scaled to fit, centred (as the Pi OS pix theme).
+screen_width = Window.GetWidth();
+screen_height = Window.GetHeight();
+theme_image = Image("splash.png");
+image_width = theme_image.GetWidth();
+image_height = theme_image.GetHeight();
+scale_x = image_width / screen_width;
+scale_y = image_height / screen_height;
+if (scale_x > 1 || scale_y > 1) {
+  if (scale_x > scale_y) {
+    resized_image = theme_image.Scale(screen_width, image_height / scale_x);
+    image_x = 0;
+    image_y = (screen_height - ((image_height * screen_width) / image_width)) / 2;
+  } else {
+    resized_image = theme_image.Scale(image_width / scale_y, screen_height);
+    image_x = (screen_width - ((image_width * screen_height) / image_height)) / 2;
+    image_y = 0;
+  }
+} else {
+  resized_image = theme_image.Scale(image_width, image_height);
+  image_x = (screen_width - image_width) / 2;
+  image_y = (screen_height - image_height) / 2;
+}
+if (Plymouth.GetMode() != "shutdown") {
+  sprite = Sprite(resized_image);
+  sprite.SetPosition(image_x, image_y, -100);
+}
+PLYS
+}
+# do_splash: render the wordmark and install it as the plymouth boot theme
+# (sudo; rebuilds the initramfs, ~1 min). `netkit splash off` restores pix.
+do_splash() {
+  local theme=/usr/share/plymouth/themes/netkit
+  if [ "${1:-}" = off ]; then
+    sudo plymouth-set-default-theme -R pix && echo "Boot splash restored to Raspberry Pi OS (pix)."; return
+  fi
+  require magick imagemagick || return 1
+  have plymouth-set-default-theme || { echo "plymouth not installed on this unit."; return 1; }
+  local png; png="$(mktemp --suffix=.png)"
+  splash_png "$png" || { echo "Could not render the splash image."; rm -f "$png"; return 1; }
+  echo "Installing boot splash for '${NETKIT_BRAND:-netKit}' (sudo; rebuilds initramfs)…"
+  local tmpd; tmpd="$(mktemp -d)"
+  plymouth_theme_write "$tmpd/netkit" "$png" || return 1
+  # The descriptor must name the final path, so rewrite it for the install location.
+  sed -i "s#$tmpd/netkit#$theme#g" "$tmpd/netkit/netkit.plymouth"
+  sudo rm -rf "$theme" && sudo cp -r "$tmpd/netkit" "$theme" && sudo chmod -R a+rX "$theme" \
+    && sudo plymouth-set-default-theme -R netkit && ok "Boot splash installed (shows on next boot)."
+  rm -rf "$tmpd" "$png"
 }
 
 site_list() { find "$site_dir" -maxdepth 1 -name '*.conf' -printf '%f\n' 2>/dev/null | sed 's/\.conf$//'; }
@@ -1466,6 +1616,26 @@ save_last_report() {
   clear; echo "Appended to $f"; pause
 }
 
+m_brand() {
+  while true; do
+    local k; k="$(menu "🏷 Branding — ${NETKIT_BRAND:-no brand} · netKit" \
+      "name|Set brand name (shown above netKit)" \
+      "preview|Preview the logo" \
+      "splash|Install as boot splash (plymouth, sudo)" \
+      "splashoff|Restore the Raspberry Pi boot splash" \
+      "back|‹ back")"
+    case "$k" in
+      name) local b; b="$(ask "Brand name (blank clears):" "$NETKIT_BRAND")"
+            clear; set_brand "$b"; echo
+            echo "Shown on every menu and the launch splash. Pick 'Install as boot splash' to brand boot too."; pause ;;
+      preview) NETKIT_SPLASH_SECS=3 splash_screen ;;
+      splash) clear; do_splash; pause ;;
+      splashoff) clear; do_splash off; pause ;;
+      *) return ;;
+    esac
+  done
+}
+
 m_system() {
   while true; do
     local k; k="$(menu "⚙️ System / Network info" \
@@ -1475,8 +1645,10 @@ m_system() {
       "rt|Routing table" \
       "dns|DNS resolver status" \
       "dash|Live tiled dashboard (tmux)" \
+      "brand|Branding / logo (${NETKIT_BRAND:-none})" \
       "back|‹ back")"
     case "$k" in
+      brand) m_brand ;;
       if) page ip -c -br addr ;;
       eth) require ethtool ethtool || continue
            local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || continue
@@ -1888,7 +2060,7 @@ do_setup() {
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
               bluez bluez-tools rfkill rtl-433 rtl-sdr swaks tio xxd
-              mbpoll knxd-tools i2c-tools evtest
+              mbpoll knxd-tools i2c-tools evtest figlet
               cage foot fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk (netkit autostart)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
@@ -2197,6 +2369,8 @@ netkit v${NETKIT_VERSION} — Pi 5 network toolkit
   netkit setup         install/refresh extra deps
   netkit selftest      bench check
   netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan…)
+  netkit brand [name]  show / set the brand shown above netKit (menus, splash)
+  netkit splash [off]  install the brand as the boot splash (plymouth) / restore
   netkit doctor        check prebuilt-binary matchers vs GitHub
   netkit site [name]   site profiles (prefill prompts per location)
   netkit autostart on|off   boot the unit straight into netkit
@@ -2295,6 +2469,7 @@ first_run_check() {
 # `return` would runtime-error on normal execution.
 [ "${NETKIT_LIB:-0}" = 1 ] && return 0
 load_site
+load_settings
 
 case "${1:-}" in
   dash) run_dash; exit 0 ;;
@@ -2303,6 +2478,8 @@ case "${1:-}" in
   setup|--setup) do_setup; exit 0 ;;
   selftest|--selftest) do_selftest; exit 0 ;;
   hw|--hw) hw_check; exit 0 ;;
+  brand) if [ $# -ge 2 ]; then set_brand "$2"; else echo "Brand: ${NETKIT_BRAND:-<none>}"; fi; exit 0 ;;
+  splash) do_splash "${2:-}"; exit 0 ;;
   doctor|--doctor) do_doctor; exit 0 ;;
   site|--site) do_site "${2:-}"; exit 0 ;;
   autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;
@@ -2323,6 +2500,7 @@ trap 'netkit_on_int' INT
 first_run_check
 
 tmux_tune
+splash_screen
 while true; do
   k="$(menu "Pick a category" \
     "-|── everyday ──────────────" \

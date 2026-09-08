@@ -229,9 +229,9 @@ test_sbin_on_path() {
 }
 
 test_menu_height() {
-  assert_eq 24 "$(menu_height 30 0)" "menu_height: 30 rows, no banner -> 24"
-  assert_eq 14 "$(menu_height 20 0)" "menu_height: 20 rows (24x12 console font) -> 14"
-  assert_eq 16 "$(menu_height 22 0)" "menu_height: 22 rows (foot 12pt) -> 16"
+  assert_eq 23 "$(menu_height 30 0)" "menu_height: 30 rows, no banner -> 23 (brand+status+header+footer)"
+  assert_eq 13 "$(menu_height 20 0)" "menu_height: 20 rows (foot 12pt) -> 13"
+  assert_eq 15 "$(menu_height 22 0)" "menu_height: 22 rows -> 15"
   assert_eq 24 "$(menu_height 60 1)" "menu_height: tall terminal with banner caps at 24"
   assert_eq 19 "$(menu_height 30 1)" "menu_height: banner costs 5 rows"
   assert_eq 5  "$(menu_height 8 0)"  "menu_height: never below 5"
@@ -297,6 +297,67 @@ test_show_output() {
   show_output "x" "kept" >/dev/null; assert_eq "kept" "$NETKIT_LAST_OUTPUT" "show_output: retains text for save_last_report"
 }
 
+test_load_settings() {
+  local d; d="$(mktemp -d)"
+  NETKIT_CFG_DIR="$d"
+  load_settings; assert_empty "$NETKIT_BRAND" "load_settings: no file -> empty brand"
+  # shellcheck disable=SC2016
+  printf '# unit settings\nBRAND=Modal AV\nBOGUS=x\nEVIL=$(touch %s/pwned)\n' "$d" > "$d/netkit.conf"
+  load_settings
+  assert_eq "Modal AV" "$NETKIT_BRAND" "load_settings: BRAND parsed (spaces kept)"
+  [ -e "$d/pwned" ]; assert_rc 1 "$?" "load_settings: never executes the file"
+  rm -rf "$d"
+}
+
+test_brand_valid() {
+  brand_valid "Modal AV";        assert_rc 0 "$?" "brand_valid: plain name"
+  brand_valid "";                assert_rc 0 "$?" "brand_valid: empty clears the brand"
+  brand_valid "A|B";             assert_rc 1 "$?" "brand_valid: rejects |"
+  brand_valid "$(printf 'a\tb')"; assert_rc 1 "$?" "brand_valid: rejects control chars"
+  brand_valid "123456789012345678901234567890123"; assert_rc 1 "$?" "brand_valid: rejects > 32 chars"
+}
+
+test_set_brand() {
+  local d; d="$(mktemp -d)"
+  NETKIT_CFG_DIR="$d"
+  set_brand "Modal AV" >/dev/null; load_settings
+  assert_eq "Modal AV" "$NETKIT_BRAND" "set_brand: writes and reloads"
+  set_brand "Other Co" >/dev/null; load_settings
+  assert_eq "Other Co" "$NETKIT_BRAND" "set_brand: replaces the existing BRAND line"
+  assert_eq 1 "$(grep -c '^BRAND=' "$d/netkit.conf")" "set_brand: exactly one BRAND line"
+  set_brand "" >/dev/null; load_settings
+  assert_empty "$NETKIT_BRAND" "set_brand: empty clears"
+  rm -rf "$d"
+}
+
+test_logo_text() {
+  have() { return 1; }   # no figlet -> plain text
+  NETKIT_BRAND="Modal AV"
+  local out; out="$(logo_text 64)"
+  assert_eq "Modal AV" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: brand on the first line"
+  assert_contains "$out" "netKit v$NETKIT_VERSION" "logo_text: fixed netKit wordmark + version under it"
+  NETKIT_BRAND=""
+  out="$(logo_text 64)"
+  assert_eq "netKit" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: no brand -> netKit is the logo"
+  assert_contains "$out" "v$NETKIT_VERSION" "logo_text: version still shown without a brand"
+  figlet() { echo "FIGLET[$*]"; }; have() { [ "$1" = figlet ]; }
+  NETKIT_BRAND="Modal AV"
+  assert_contains "$(logo_text 64)" "FIGLET[" "logo_text: uses figlet when present"
+  NETKIT_BRAND=""
+}
+
+test_plymouth_theme_write() {
+  local d; d="$(mktemp -d)"
+  : > "$d/splash.png"
+  plymouth_theme_write "$d/netkit" "$d/splash.png"
+  [ -f "$d/netkit/netkit.plymouth" ]; assert_rc 0 "$?" "plymouth_theme_write: descriptor written"
+  [ -f "$d/netkit/netkit.script" ];   assert_rc 0 "$?" "plymouth_theme_write: script written"
+  [ -f "$d/netkit/splash.png" ];      assert_rc 0 "$?" "plymouth_theme_write: splash copied"
+  assert_contains "$(cat "$d/netkit/netkit.plymouth")" "ImageDir=$d/netkit" "plymouth_theme_write: descriptor points at the theme dir"
+  assert_contains "$(cat "$d/netkit/netkit.script")" 'Image("splash.png")' "plymouth_theme_write: script loads splash.png"
+  rm -rf "$d"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -322,6 +383,11 @@ run_test test_menu_default_label
 run_test test_page_sudo_prime
 run_test test_arpscan_file_args
 run_test test_show_output
+run_test test_load_settings
+run_test test_brand_valid
+run_test test_set_brand
+run_test test_logo_text
+run_test test_plymouth_theme_write
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
