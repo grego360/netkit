@@ -61,7 +61,9 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    there is deliberately no `runsh`/`bash -c` wrapper, as it invited command injection
    from prompt input; when a redirect or compound command is genuinely needed, write an
    inline `clear`/`echo`/`cmd`/`pause` block with quoted args), `page` (capture + pager
-   for long **batch** output), `spin` (gum progress for slow hidden-output steps),
+   for long **batch** output), `show_output <title> <text>` (the display half of
+   `page`, for actions that build their own text — never print-then-`pause` a
+   result), `spin` (gum progress for slow hidden-output steps),
    `say`/`ok`/`warn`/`bad`, `need_iface`. **`run` must not be confused with `page`:
    `page` captures stdout and must only wrap batch commands** — wavemon, termshark,
    gping, btmon, tcpdump etc. own the terminal and corrupt if captured; call those via
