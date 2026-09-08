@@ -267,7 +267,7 @@ page() {
   if [ "$(printf '%s\n' "$out" | wc -l)" -le "$((rows - 4))" ]; then
     printf '%s\n' "$out"; pause
   elif have gum; then
-    printf '%s\n' "$out" | gum pager
+    printf '%s\n' "$out" | GUM_PAGER_SHOW_LINE_NUMBERS=false gum pager   # numbers cost 6 cols on a 63-col panel
   else
     printf '%s\n' "$out" | less -R
   fi
@@ -283,6 +283,19 @@ need_iface() {
   [ -n "$IFACE" ] && return 0
   clear; echo "No usable network interface detected."; pause; return 1
 }
+
+# arp-scan 1.10 drops root and then opens ieee-oui.txt / mac-vendor.txt relative
+# to the cwd; with a 0750 home dir that fails with EACCES and it gives up before
+# trying the system copies, so every host shows as "(Unknown)". Name the files.
+arpscan_file_args() {   # arpscan_file_args <ouifile> <macfile> -> one --flag per existing file
+  [ -f "$1" ] && echo "--ouifile=$1"
+  [ -f "$2" ] && echo "--macfile=$2"
+  return 0
+}
+ARPSCAN_FILES=()
+while IFS= read -r _a; do ARPSCAN_FILES+=("$_a"); done \
+  < <(arpscan_file_args /usr/share/arp-scan/ieee-oui.txt /etc/arp-scan/mac-vendor.txt)
+unset _a
 
 # ---------- site profiles ----------
 # Safe key=value parser (NOT sourced — config never executes as code).
@@ -813,7 +826,7 @@ m_discovery() {
       "n6|IPv6 (neighbours / routers)" \
       "back|‹ back")"
     case "$k" in
-      arp) need_iface || continue; page sudo arp-scan --interface="$IFACE" --localnet ;;
+      arp) need_iface || continue; page sudo arp-scan --interface="$IFACE" --localnet "${ARPSCAN_FILES[@]}" ;;
       fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
            require fping fping || continue
            # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
@@ -2197,7 +2210,7 @@ quick_run() {
   case "$1" in
     gw)       run ping -c4 "${GW:-1.1.1.1}" ;;
     arp)      need_iface || return; require arp-scan arp-scan || return
-              page sudo arp-scan --interface="$IFACE" --localnet ;;
+              page sudo arp-scan --interface="$IFACE" --localnet "${ARPSCAN_FILES[@]}" ;;
     nsn)      local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
     btscan)   bt_scan ;;

@@ -274,6 +274,15 @@ test_page_sudo_prime() {
   assert_contains "$out" "sudo -v" "page: falls back to sudo -v when a password is needed"
 }
 
+test_arpscan_file_args() {
+  local d; d="$(mktemp -d)"; : > "$d/oui.txt"
+  assert_eq "--ouifile=$d/oui.txt" "$(arpscan_file_args "$d/oui.txt" "$d/missing.txt")" "arpscan_file_args: only existing files become flags"
+  : > "$d/mac.txt"
+  assert_eq "--ouifile=$d/oui.txt --macfile=$d/mac.txt" "$(arpscan_file_args "$d/oui.txt" "$d/mac.txt" | paste -sd" " -)" "arpscan_file_args: both files"
+  assert_empty "$(arpscan_file_args "$d/none" "$d/none2")" "arpscan_file_args: nothing when neither exists"
+  rm -rf "$d"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -297,6 +306,7 @@ run_test test_tmux_tune
 run_test test_autostart_block_kiosk
 run_test test_menu_default_label
 run_test test_page_sudo_prime
+run_test test_arpscan_file_args
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
