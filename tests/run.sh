@@ -208,6 +208,15 @@ test_hw_check() {
   rm -rf "$root"
 }
 
+test_confirm() {
+  have() { return 1; }   # plain-read path (gum confirm needs a tty)
+  confirm "Go?" <<<"y";   assert_rc 0 "$?" "confirm: y -> yes"
+  confirm "Go?" <<<"YES"; assert_rc 0 "$?" "confirm: YES -> yes"
+  confirm "Go?" <<<"n";   assert_rc 1 "$?" "confirm: n -> no"
+  confirm "Go?" <<<"";    assert_rc 1 "$?" "confirm: empty -> no (default)"
+  confirm "Go?" <<<"Ny";  assert_rc 1 "$?" "confirm: stray text -> no"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -224,6 +233,7 @@ run_test test_ui_glyphs
 run_test test_autostart_block
 run_test test_run_dash_nested
 run_test test_hw_check
+run_test test_confirm
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"

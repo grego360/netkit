@@ -65,12 +65,7 @@ require() {
   have "$cmd" && return 0
   clear
   warn "$cmd not installed${hint:+  ($hint)}"
-  if have gum; then
-    gum confirm "Run 'netkit setup' now?" && { do_setup; pause; }
-  else
-    local a; read -rp "Run 'netkit setup' now? (y/N): " a
-    case "$a" in y|Y|yes|YES) do_setup; pause ;; esac
-  fi
+  confirm "Run 'netkit setup' now?" && { do_setup; pause; }
   have "$cmd"
 }
 
@@ -136,6 +131,14 @@ ask() { # prompt, default -> prints answer
   local p="$1" d="${2:-}"
   if have gum; then gum input --prompt "$p " --value "$d"
   else local v; read -rp "$p [$d]: " v; echo "${v:-$d}"; fi
+}
+
+# confirm <question>: yes/no gate, default No; 0 = yes. gum confirm (arrow keys /
+# enter) when available — never a prefilled "N" the user has to delete first —
+# else a plain read that accepts y/yes only.
+confirm() {
+  if have gum; then gum confirm --default=false "$1"
+  else local a; read -rp "$1 (y/N): " a; case "$a" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac; fi
 }
 
 # ask_req: like ask but returns non-zero (aborts the action) on empty input
@@ -614,8 +617,7 @@ device_del_cmd() { # name
 }
 
 device_delete() { # name
-  local a; a="$(ask "Delete device '$1'? (y/N):" "N")"
-  case "$a" in y|Y|yes|YES) rm -f "$device_dir/$1.conf"; clear; echo "Deleted $1."; pause ;;
+  case "$(confirm "Delete device '$1'?" && echo y)" in y) rm -f "$device_dir/$1.conf"; clear; echo "Deleted $1."; pause ;;
                *) clear; echo "Cancelled."; pause ;; esac
 }
 
@@ -948,7 +950,7 @@ smtp_check() {
 
 smtp_send() {
   require swaks swaks || return
-  local h p from to tlsmode auth user defport
+  local h p from to tlsmode user defport
   tlsmode="$(menu "Encryption" \
     "starttls|STARTTLS (submission, 587)" \
     "smtps|SMTPS / TLS-on-connect (465)" \
@@ -965,11 +967,10 @@ smtp_send() {
     starttls) cmd+=(--tls) ;;
     smtps)    cmd+=(--tls-on-connect) ;;
   esac
-  auth="$(ask "Use SMTP auth? (y/N):" "N")"
-  case "$auth" in
-    y|Y|yes|YES) user="$(ask_req "Auth username:" "")" || return
-                 cmd+=(--auth --auth-user "$user" --auth-hide-password) ;;
-  esac
+  if confirm "Use SMTP auth?"; then
+    user="$(ask_req "Auth username:" "")" || return
+    cmd+=(--auth --auth-user "$user" --auth-hide-password)
+  fi
   run "${cmd[@]}"
 }
 
@@ -1252,12 +1253,7 @@ bt_preflight() {           # 0 = a controller is ready; else explain + bail
   clear; bad "no Bluetooth controller available"
   if have rfkill && rfkill list bluetooth 2>/dev/null | grep -qi 'soft blocked: yes'; then
     warn "radio is soft-blocked by rfkill"
-    if have gum; then
-      gum confirm "Run 'sudo rfkill unblock bluetooth' now?" && sudo rfkill unblock bluetooth
-    else
-      local a; read -rp "Run 'sudo rfkill unblock bluetooth' now? (y/N): " a
-      case "$a" in y|Y|yes|YES) sudo rfkill unblock bluetooth ;; esac
-    fi
+    confirm "Run 'sudo rfkill unblock bluetooth' now?" && sudo rfkill unblock bluetooth
     bluetoothctl list 2>/dev/null | grep -q '^Controller' && return 0
   else
     warn "controller missing or bluetoothd down (try: sudo systemctl start bluetooth)"
@@ -1513,8 +1509,7 @@ modbus_rw() {
     page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -c "$count" -1 "$G_MB_TARGET"
   else
     local value a; value="$(ask_req "Value to write:" "")" || return
-    a="$(ask "Write '$value' to $G_MB_TARGET (slave $slave, t$rtype @$addr)? (y/N):" "N")"
-    case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+    confirm "Write '$value' to $G_MB_TARGET (slave $slave, t$rtype @$addr)?" || { clear; echo "Cancelled."; pause; return; }
     # '--' guards a negative value from being parsed as an option.
     page mbpoll "${G_MB_OPTS[@]}" -a "$slave" -t "$rtype" -r "$addr" -1 "$G_MB_TARGET" -- "$value"
   fi
@@ -1554,8 +1549,7 @@ bacnet_write() {
   prop="$(ask_req "Property (e.g. pv):" "pv")" || return
   val="$(ask_req "Value to write:" "")" || return
   pri="$(ask_num "Priority (1-16):" "8")" || return
-  a="$(ask "Write '$val' to $tgt $obj $prop @prio $pri? (y/N):" "N")"
-  case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; return ;; esac
+  confirm "Write '$val' to $tgt $obj $prop @prio $pri?" || { clear; echo "Cancelled."; pause; return; }
   page bacnet -i "$SELFIP" write "$tgt" "$obj" "$prop" "$val" --priority "$pri"
 }
 
@@ -1613,8 +1607,7 @@ m_knx() {
       write) local ga val a
              ga="$(ask_req "Group address (x/y/z):" "")" || continue
              val="$(ask_req "Value (decimal byte(s)):" "")" || continue
-             a="$(ask "Write '$val' to $ga via $url? (y/N):" "N")"
-             case "$a" in y|Y|yes|YES) ;; *) clear; echo "Cancelled."; pause; continue ;; esac
+             confirm "Write '$val' to $ga via $url?" || { clear; echo "Cancelled."; pause; continue; }
              page knxtool groupwrite "$url" "$ga" "$val" ;;
       *) return ;;
     esac
@@ -2045,11 +2038,8 @@ do_update() {
 do_uninstall() {
   echo "This removes $NETKIT_BIN only."
   echo "It leaves apt packages, ~/.config/netkit, and ~/netkit-reports in place."
-  local a; a="$(ask "Remove netkit? (y/N):" "N")"
-  case "$a" in
-    y|Y|yes|YES) sudo rm -f "$NETKIT_BIN" && echo "Removed $NETKIT_BIN." ;;
-    *) echo "Cancelled." ;;
-  esac
+  if confirm "Remove netkit?"; then sudo rm -f "$NETKIT_BIN" && echo "Removed $NETKIT_BIN."
+  else echo "Cancelled."; fi
 }
 
 # ---------- boot-to-netkit (explicit, reversible) ----------
@@ -2075,8 +2065,7 @@ do_autostart() {
       echo "  • enable console autologin for '$USER' on tty1 (systemd drop-in)"
       echo "  • launch netkit (inside tmux) on tty1 login via a guarded ~/.bash_profile block"
       echo "It edits system config but is fully reversible: netkit autostart off"
-      local a; a="$(ask "Proceed? (y/N):" "N")"
-      case "$a" in y|Y|yes|YES) ;; *) echo "Cancelled."; return ;; esac
+      confirm "Proceed?" || { echo "Cancelled."; return; }
       sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
       # shellcheck disable=SC2016  # $TERM must stay literal — systemd expands it at boot
       printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin %s --noclear %%I $TERM\n' "$USER" \
