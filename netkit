@@ -256,8 +256,10 @@ RP_HOST=""; RP_COMM=""   # interactive report SNMP target (set by report_snmp_pr
 page() {
   clear; printf '$ %s\n%s\n' "$*" "------------------------------------------"
   # Prime sudo first so a password prompt shows on the tty rather than being
-  # swallowed by the 2>&1 capture below (which would look like a hang).
-  [ "$1" = sudo ] && sudo -v 2>/dev/null
+  # swallowed by the 2>&1 capture below (which would look like a hang). Try a
+  # non-interactive sudo first: `sudo -v` insists on a password even under a
+  # NOPASSWD rule (sudo 1.9.16), which would stall a kiosk with no way to type it.
+  [ "$1" = sudo ] && { sudo -n true 2>/dev/null || sudo -v 2>/dev/null; }
   local out rc rows
   out="$("$@" 2>&1)"; rc=$?
   NETKIT_LAST_OUTPUT="$out"

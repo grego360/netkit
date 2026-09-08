@@ -262,6 +262,18 @@ test_menu_default_label() {
   assert_empty "$(menu_default_label "-|── hdr ──")"                          "menu_default_label: only headers -> empty"
 }
 
+test_page_sudo_prime() {
+  # sudo -v prompts for a password even under NOPASSWD (sudo 1.9.16), so page must
+  # only fall back to it when a non-interactive sudo fails.
+  clear() { :; }; pause() { :; }; tput() { echo 50; }; have() { return 1; }
+  sudo() { printf 'sudo %s\n' "$*"; [ "$1" = -n ] && return "${SUDO_N_RC:-0}"; return 0; }
+  local out; out="$( SUDO_N_RC=0 page sudo arp-scan --localnet )"
+  assert_contains "$out" "sudo -n true" "page: primes with a non-interactive sudo first"
+  case "$out" in *"sudo -v"*) printf '  FAIL: page: must not call sudo -v when NOPASSWD works\n'; echo x >>"$fails" ;; *) printf '  ok: page: no sudo -v when NOPASSWD works\n' ;; esac
+  out="$( SUDO_N_RC=1 page sudo arp-scan --localnet )"
+  assert_contains "$out" "sudo -v" "page: falls back to sudo -v when a password is needed"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -284,6 +296,7 @@ run_test test_menu_height
 run_test test_tmux_tune
 run_test test_autostart_block_kiosk
 run_test test_menu_default_label
+run_test test_page_sudo_prime
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
