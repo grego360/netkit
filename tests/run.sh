@@ -256,6 +256,12 @@ test_autostart_block_kiosk() {
   assert_contains "$b" 'exec tmux new-session -A -s netkit netkit' "autostart_block: console path still present"
 }
 
+test_menu_default_label() {
+  assert_eq "Alpha" "$(menu_default_label "-|── hdr ──" "a|Alpha" "b|Beta")" "menu_default_label skips the section header"
+  assert_eq "Alpha" "$(menu_default_label "a|Alpha" "b|Beta")"              "menu_default_label: first item when no header"
+  assert_empty "$(menu_default_label "-|── hdr ──")"                          "menu_default_label: only headers -> empty"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -277,6 +283,7 @@ run_test test_sbin_on_path
 run_test test_menu_height
 run_test test_tmux_tune
 run_test test_autostart_block_kiosk
+run_test test_menu_default_label
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"

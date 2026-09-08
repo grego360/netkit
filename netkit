@@ -103,6 +103,13 @@ tmux_tune() {
   if on_console || [ "$(tput lines 2>/dev/null || echo 24)" -lt 40 ]; then tmux set-option status off; fi
 }
 
+# menu_default_label "key|Label" ... -> label of the first selectable row, so the
+# cursor opens on a real entry rather than on a section divider.
+menu_default_label() {
+  local pair
+  for pair in "$@"; do [ "${pair%%|*}" = "-" ] || { echo "${pair#*|}"; return; }; done
+}
+
 # menu "Header" "key|Label" ... -> prints the chosen key (empty if cancelled).
 # Clears the screen and redraws the status line first (stderr — the caller captures
 # stdout), so an action's leftover output never sits above the next menu.
@@ -119,7 +126,8 @@ menu() {
   local labels=() keys=() pair
   for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
   local chosen="" i
-  local rows show_banner=0 h
+  local rows show_banner=0 h first
+  first="$(menu_default_label "$@")"
   rows="$(tput lines 2>/dev/null || echo 24)"
   menu_show_banner "$rows" && show_banner=1
   h="$(menu_height "$rows" "$show_banner")"
@@ -131,7 +139,7 @@ menu() {
         GUM_CHOOSE_CURSOR_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_SELECTED_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_HEADER_FOREGROUND="$C_ACCENT" \
-        gum choose --header "$header   (esc cancels)" --height "$h")"
+        gum choose --header "$header   (esc cancels)" --height "$h" --selected="$first")"
       [ -z "$chosen" ] && { echo ""; return; }
       for i in "${!labels[@]}"; do
         if [ "${labels[$i]}" = "$chosen" ]; then
