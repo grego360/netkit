@@ -2422,7 +2422,7 @@ m_quick() {
 }
 
 show_help() {
-  local -a pager=(less -R); have gum && pager=(gum pager)
+  local -a pager=(less -R); have gum && pager=(gum pager --show-line-numbers=false)
   cat <<'H' | "${pager[@]}"
 netkit — quick help
 
