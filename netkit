@@ -1879,6 +1879,80 @@ do_setup() {
   echo "Tip: run 'netkit selftest' to confirm, and 'netkit doctor' to pre-check binary matchers."
 }
 
+# ---------- PocketTerm35 hardware check ----------
+# The unit is a Waveshare PocketTerm35 (Pi 5 inside): 3.5" 640x480 panel fed over
+# HDMI-A-1 (speaker rides the HDMI audio), Goodix GT911 touch on i2c-1, an RP2040
+# "Pico" USB keyboard/trackpad on the Pi's USB-C (needs dtoverlay=dwc2,dr_mode=host),
+# Pi5 Active Cooler on the fan header, UPS battery board with no fuel-gauge driver.
+# Everything below reads sysfs/procfs only — no sudo. NETKIT_SYS / NETKIT_PROC let
+# the unit tests point the probes at a fake tree.
+NETKIT_SYS="${NETKIT_SYS:-/sys}"; NETKIT_PROC="${NETKIT_PROC:-/proc}"
+hw_read() { [ -f "$1" ] && tr -d '\0\n' <"$1"; }   # hw_read <file>: contents or ""
+
+hw_display() {
+  local c="$NETKIT_SYS/class/drm/card1-HDMI-A-1" st mode
+  st="$(hw_read "$c/status")"; mode="$(head -1 "$c/modes" 2>/dev/null)"
+  case "$st" in
+    connected) ok "display HDMI-A-1 connected ${mode:-?}" ;;
+    "")        bad "display HDMI-A-1 not present (vc4-kms-v3d overlay / cable)" ;;
+    *)         bad "display HDMI-A-1 $st" ;;
+  esac
+}
+hw_touch() {
+  if grep -q 'Name="Goodix' "$NETKIT_PROC/bus/input/devices" 2>/dev/null; then ok "touch Goodix GT911 on i2c-1"
+  else bad "touch Goodix controller missing (dtparam=i2c_arm=on + waveshare-35dpi-5b overlay)"; fi
+}
+hw_keyboard() {
+  if grep -q 'Pico Keyboard' "$NETKIT_PROC/bus/input/devices" 2>/dev/null; then ok "keyboard Pico USB keyboard/trackpad"
+  else bad "keyboard Pico USB device missing (dtoverlay=dwc2,dr_mode=host / cable)"; fi
+}
+hw_fan() {
+  local st h rpm=""
+  st="$(hw_read "$NETKIT_PROC/device-tree/cooling_fan/status")"
+  for h in "$NETKIT_SYS"/class/hwmon/*; do
+    [ -f "$h/fan1_input" ] && { rpm="$(hw_read "$h/fan1_input")"; break; }
+  done
+  if [ "$st" = okay ] && [ -n "$rpm" ]; then ok "fan $rpm rpm"
+  elif [ "$st" = okay ]; then warn "fan enabled but no tach reading"
+  else bad "fan NOT detected by firmware (cooling_fan $st) — reseat the Active Cooler cable on the FAN header"; fi
+}
+hw_rtc() {
+  local n; n="$(hw_read "$NETKIT_SYS/class/rtc/rtc0/name")"
+  if [ -n "$n" ]; then ok "rtc ${n%% *}"; else warn "rtc not present"; fi
+}
+hw_battery() {
+  local p
+  for p in "$NETKIT_SYS"/class/power_supply/*; do
+    [ "$(hw_read "$p/type")" = Battery ] || continue
+    ok "battery $(hw_read "$p/capacity")% $(hw_read "$p/status")"; return
+  done
+  warn "battery not exposed (UPS board has no fuel-gauge driver; watch the board LEDs)"
+}
+hw_thermal() {
+  local t; t="$(hw_read "$NETKIT_SYS/class/thermal/thermal_zone0/temp")"
+  [ -n "$t" ] || { warn "SoC temperature unavailable"; return; }
+  t=$((t / 1000))
+  if [ "$t" -ge 80 ]; then bad "SoC ${t}°C (throttling)"
+  elif [ "$t" -ge 70 ]; then warn "SoC ${t}°C (hot — check the fan)"
+  else ok "SoC ${t}°C"; fi
+}
+hw_eeprom() {
+  have rpi-eeprom-config || { warn "EEPROM rpi-eeprom-config not installed"; return; }
+  local cfg; cfg="$(rpi-eeprom-config 2>/dev/null)"
+  case "$cfg" in
+    *NET_INSTALL_AT_POWER_ON=0*) ok "EEPROM NET_INSTALL_AT_POWER_ON=0" ;;
+    *) warn "EEPROM NET_INSTALL_AT_POWER_ON=1 — boot-time net-install screen corrupts the panel (set 0)" ;;
+  esac
+  case "$cfg" in
+    *PSU_MAX_CURRENT=5000*) ok "EEPROM PSU_MAX_CURRENT=5000" ;;
+    *) warn "EEPROM PSU_MAX_CURRENT unset — non-PD UPS supply gets capped at 3A (set 5000)" ;;
+  esac
+}
+hw_check() {
+  say "PocketTerm35 hardware"
+  hw_display; hw_touch; hw_keyboard; hw_fan; hw_rtc; hw_battery; hw_thermal; hw_eeprom
+}
+
 do_selftest() {
   clear; banner
   status_line
@@ -1915,6 +1989,7 @@ do_selftest() {
     local up; up="$(sudo nmap -sn "$CIDR" 2>/dev/null | grep -c 'Nmap scan report')"
     ok "nmap ping sweep $CIDR -> ${up:-0} host(s) up"
   fi
+  hw_check
   echo
 }
 
@@ -2038,6 +2113,7 @@ netkit v${NETKIT_VERSION} — Pi 5 network toolkit
   netkit sweep         full commissioning sweep → branded report
   netkit setup         install/refresh extra deps
   netkit selftest      bench check
+  netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan…)
   netkit doctor        check prebuilt-binary matchers vs GitHub
   netkit site [name]   site profiles (prefill prompts per location)
   netkit autostart on|off   boot the unit straight into netkit
@@ -2057,6 +2133,7 @@ quick_run() {
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
     btscan)   bt_scan ;;
     selftest) clear; do_selftest; pause ;;
+    hw) clear; hw_check; echo; pause ;;
     sweep)    gen_sweep "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}" ;;
     *) : ;;
   esac
@@ -2071,6 +2148,7 @@ m_quick() {
       "lldp|LLDP neighbour (switch / port)" \
       "btscan|Bluetooth scan (name + RSSI)" \
       "selftest|Self-test (tools + live network)" \
+      "hw|Hardware check (PocketTerm35: display, touch, keyboard, fan, battery)" \
       "sweep|Full sweep → report" \
       "back|‹ back")"
     case "$k" in ""|back) return ;; *) quick_run "$k" ;; esac
@@ -2139,6 +2217,7 @@ case "${1:-}" in
   sweep) gen_sweep "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}"; exit 0 ;;
   setup|--setup) do_setup; exit 0 ;;
   selftest|--selftest) do_selftest; exit 0 ;;
+  hw|--hw) hw_check; exit 0 ;;
   doctor|--doctor) do_doctor; exit 0 ;;
   site|--site) do_site "${2:-}"; exit 0 ;;
   autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;

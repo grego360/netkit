@@ -171,6 +171,43 @@ test_run_dash_nested() {
   assert_contains "$top" "attach -t netkit-dash"         "run_dash outside tmux attaches to it"
 }
 
+# PocketTerm35 hardware probes read sysfs/procfs only; point them at a fake tree.
+test_hw_check() {
+  local root; root="$(mktemp -d)"
+  NETKIT_SYS="$root/sys"; NETKIT_PROC="$root/proc"
+  mkdir -p "$NETKIT_SYS/class/drm/card1-HDMI-A-1" "$NETKIT_PROC/bus/input" "$NETKIT_PROC/device-tree/cooling_fan" \
+           "$NETKIT_SYS/class/thermal/thermal_zone0" "$NETKIT_SYS/class/rtc/rtc0" "$NETKIT_SYS/class/power_supply" "$NETKIT_SYS/class/hwmon"
+  echo connected > "$NETKIT_SYS/class/drm/card1-HDMI-A-1/status"; echo 640x480 > "$NETKIT_SYS/class/drm/card1-HDMI-A-1/modes"
+  printf 'N: Name="My Company My Custom Pico Keyboard"\nN: Name="Goodix Capacitive TouchScreen"\n' > "$NETKIT_PROC/bus/input/devices"
+  printf 'disabled\0' > "$NETKIT_PROC/device-tree/cooling_fan/status"
+  echo 61150 > "$NETKIT_SYS/class/thermal/thermal_zone0/temp"
+  echo rpi-rtc > "$NETKIT_SYS/class/rtc/rtc0/name"
+  have() { [ "$1" = rpi-eeprom-config ]; }
+  rpi-eeprom-config() { printf 'NET_INSTALL_AT_POWER_ON=1\n'; }
+  local out; out="$(hw_check)"
+  assert_contains "$out" "display HDMI-A-1 connected 640x480" "hw: display connector + mode"
+  assert_contains "$out" "touch Goodix"                       "hw: Goodix touch present"
+  assert_contains "$out" "keyboard Pico"                      "hw: Pico USB keyboard present"
+  assert_contains "$out" "fan NOT detected"                   "hw: fan disabled in device-tree is flagged"
+  assert_contains "$out" "rtc rpi-rtc"                        "hw: RTC named"
+  assert_contains "$out" "battery not exposed"                "hw: no power_supply -> battery warning"
+  assert_contains "$out" "SoC 61"                             "hw: SoC temperature in C"
+  assert_contains "$out" "NET_INSTALL_AT_POWER_ON=1"          "hw: EEPROM net-install flagged"
+  assert_contains "$out" "PSU_MAX_CURRENT unset"              "hw: EEPROM PSU cap flagged"
+  # healthy variants
+  printf 'okay\0' > "$NETKIT_PROC/device-tree/cooling_fan/status"
+  mkdir -p "$NETKIT_SYS/class/hwmon/hwmon3"; echo pwmfan > "$NETKIT_SYS/class/hwmon/hwmon3/name"; echo 3200 > "$NETKIT_SYS/class/hwmon/hwmon3/fan1_input"
+  assert_contains "$(hw_fan)" "fan 3200 rpm" "hw: fan rpm from hwmon"
+  mkdir -p "$NETKIT_SYS/class/power_supply/bat"; echo Battery > "$NETKIT_SYS/class/power_supply/bat/type"
+  echo 77 > "$NETKIT_SYS/class/power_supply/bat/capacity"; echo Discharging > "$NETKIT_SYS/class/power_supply/bat/status"
+  assert_contains "$(hw_battery)" "battery 77% Discharging" "hw: battery capacity + status"
+  rpi-eeprom-config() { printf 'NET_INSTALL_AT_POWER_ON=0\nPSU_MAX_CURRENT=5000\n'; }
+  assert_contains "$(hw_eeprom)" "PSU_MAX_CURRENT=5000" "hw: EEPROM settings applied"
+  echo disconnected > "$NETKIT_SYS/class/drm/card1-HDMI-A-1/status"
+  assert_contains "$(hw_display)" "display HDMI-A-1 disconnected" "hw: display disconnected is flagged"
+  rm -rf "$root"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -186,6 +223,7 @@ run_test test_vt_plain
 run_test test_ui_glyphs
 run_test test_autostart_block
 run_test test_run_dash_nested
+run_test test_hw_check
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"

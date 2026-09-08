@@ -72,8 +72,27 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 
 ## Environment (assume this; don't re-ask)
 
-- **Device:** Raspberry Pi 5 handheld, Raspberry Pi OS (Debian 13 Trixie), 64-bit
-  (aarch64), desktop image with lightdm + labwc installed.
+- **Device:** Waveshare [PocketTerm35](https://docs.waveshare.com/PocketTerm35) handheld
+  with a Raspberry Pi 5 inside, Raspberry Pi OS (Debian 13 Trixie), 64-bit (aarch64),
+  desktop image with lightdm + labwc installed. Hardware map (all verified on the unit,
+  re-check any time with `netkit hw`):
+  - 3.5" 640x480 IPS panel fed over **HDMI-A-1** (the speaker rides HDMI audio,
+    PipeWire default sink "Built-in Audio Digital Stereo (HDMI)");
+  - **Goodix GT911** capacitive touch on `i2c-1` (needs `dtparam=i2c_arm=on` +
+    `dtoverlay=waveshare-35dpi-5b` from Waveshare's `3.5HDMI_E_DTBO.zip`; the docs
+    also add the `-4b` overlay, whose second Goodix node fails with `-EBUSY` on a Pi 5
+    — harmless);
+  - 67-key keyboard + trackpad = an RP2040 **"My Custom Pico Keyboard"/"Pico Mouse"**
+    USB device on the Pi's USB-C port (needs `dtoverlay=dwc2,dr_mode=host`); Fn+−/+
+    drives the backlight in hardware (no `/sys/class/backlight`);
+  - Pi5 Active Cooler B on the FAN header — firmware sets
+    `/proc/device-tree/cooling_fan/status` to `okay` only when it detects the fan;
+  - UPS board + 5000 mAh cell: no fuel gauge exposed to Linux (`/sys/class/power_supply`
+    is empty), battery state comes from the board LEDs only; short-press the Pi 5's
+    silicone button to shut down, then double-press the top power button to cut power;
+  - Pi 5 onboard RTC (`rpi-rtc`), no backup cell;
+  - EEPROM: Waveshare's FAQ wants `NET_INSTALL_AT_POWER_ON=0` (the net-install splash
+    corrupts the panel) and `PSU_MAX_CURRENT=5000` (the UPS is not a PD supply).
 - **Access:** Pi user `terminosa`, reached via SSH from a Mac (user `moonshaper`)
   or directly. Small screen — keep output concise.
 - **Layout:** `netkit` at `/usr/local/bin/netkit`; config at
@@ -168,7 +187,8 @@ netkit dash          tiled live view (tmux)
 netkit report        markdown site snapshot
 netkit sweep         full commissioning sweep → branded report
 netkit setup         install/refresh extra deps
-netkit selftest      bench check (tools + live network)
+netkit selftest      bench check (tools + live network + hardware)
+netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan…)
 netkit doctor        check prebuilt-binary matchers vs GitHub
 netkit site [name]   site profiles (prefill prompts per location)
 netkit autostart on|off   boot the unit straight into netkit
@@ -299,11 +319,13 @@ folder.
     glyphs for them (also triggers on a bare `TERM=linux` login);
   - the tiled dashboard opens as a tmux *window* of that session (Ctrl-b & closes
     it) instead of nesting a second `tmux attach`, which tmux refuses.
-  On a desktop image the greeter owns the monitor, so autostart only shows if the
+  On a desktop image the greeter owns the panel, so autostart only shows if the
   unit boots to the console (`sudo systemctl set-default multi-user.target`, or
-  raspi-config → System → Boot). Worth pairing with a readable console font
-  (`FONTFACE="Terminus" FONTSIZE="16x32"` in `/etc/default/console-setup`) and
-  `consoleblank=0` on the `/boot/firmware/cmdline.txt` line so the VT never blanks.
+  raspi-config → System → Boot). Keep the default 8x16 console font: the 640x480
+  panel gives 80x30 characters, which is what the menus are sized for; a 16x32 font
+  would leave 40x15. The VT blanks after 10 min (kernel default, saves battery) —
+  add `consoleblank=0` to `/boot/firmware/cmdline.txt` only for a permanently
+  displayed dashboard.
 - Overlay-root, the Pi 5 RTC, and hotspot/AP mode are intentionally **not**
   automated — documented as manual steps rather than applied by the script.
 
