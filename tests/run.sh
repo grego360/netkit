@@ -283,6 +283,20 @@ test_arpscan_file_args() {
   rm -rf "$d"
 }
 
+test_show_output() {
+  clear() { :; }; pause() { echo PAUSED; }; tput() { echo 12; }; have() { return 1; }
+  less() { echo "LESS:"; cat; }
+  local out; out="$(show_output "my cmd" "$(printf 'l1\nl2\nl3')")"
+  assert_contains "$out" "\$ my cmd" "show_output: inline shows the command title"
+  assert_contains "$out" "PAUSED"   "show_output: inline waits for Enter"
+  case "$out" in *LESS:*) printf '  FAIL: show_output: short text must not open the pager\n'; echo x >>"$fails" ;; *) printf '  ok: show_output: short text stays inline\n' ;; esac
+  out="$(show_output "long cmd" "$(seq 1 20)")"
+  assert_contains "$out" "LESS:"     "show_output: long text opens the pager"
+  assert_contains "$out" "\$ long cmd" "show_output: pager content starts with the title"
+  case "$out" in *PAUSED*) printf '  FAIL: show_output: pager path must not also pause\n'; echo x >>"$fails" ;; *) printf '  ok: show_output: pager path does not pause\n' ;; esac
+  show_output "x" "kept" >/dev/null; assert_eq "kept" "$NETKIT_LAST_OUTPUT" "show_output: retains text for save_last_report"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -307,6 +321,7 @@ run_test test_autostart_block_kiosk
 run_test test_menu_default_label
 run_test test_page_sudo_prime
 run_test test_arpscan_file_args
+run_test test_show_output
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"

@@ -260,20 +260,31 @@ page() {
   # non-interactive sudo first: `sudo -v` insists on a password even under a
   # NOPASSWD rule (sudo 1.9.16), which would stall a kiosk with no way to type it.
   [ "$1" = sudo ] && { sudo -n true 2>/dev/null || sudo -v 2>/dev/null; }
-  local out rc rows
+  local out rc
   out="$("$@" 2>&1)"; rc=$?
+  show_output "$*" "$out"
+  return "$rc"
+}
+
+# show_output <title> <text>: the display half of page, for actions that build
+# their own output (bt_scan table, selftest, fping, PJLink probe …). Inline with
+# a pause when it fits the screen; otherwise the pager, with the title as its
+# first line so the context survives. Never let such an action print-then-pause
+# on its own: on the 20-row panel the top of the result is gone before the pause.
+show_output() {
+  local title="$1" out="$2" rows
   NETKIT_LAST_OUTPUT="$out"
   rows="$(tput lines 2>/dev/null || echo 24)"
+  clear; printf '$ %s\n%s\n' "$title" "------------------------------------------"
   if [ "$(printf '%s\n' "$out" | wc -l)" -le "$((rows - 4))" ]; then
     printf '%s\n' "$out"; pause
   elif have gum; then
     # --show-line-numbers has no env-var form (gum ≥ 0.9 accepts the flag); the
     # numbers cost 6 columns on the 63-column panel.
-    printf '%s\n' "$out" | gum pager --show-line-numbers=false
+    printf '$ %s\n%s\n%s\n' "$title" "------------------------------------------" "$out" | gum pager --show-line-numbers=false
   else
-    printf '%s\n' "$out" | less -R
+    printf '$ %s\n%s\n%s\n' "$title" "------------------------------------------" "$out" | less -R
   fi
-  return "$rc"
 }
 
 say()  { printf '\n%s▶ %s%s\n' "$C_HDR"  "$*" "$C_RST"; }
@@ -699,10 +710,7 @@ pjlink_probe() {
     line="$(printf '%s\n' "$raw" | tr '\r' '\n' | grep '^%1' | head -n1)"
     out="$out$(printf '%-5s %s' "$q" "${line:-<no reply>}")"$'\n'
   done
-  NETKIT_LAST_OUTPUT="$out"
-  clear
-  printf 'PJLink probe — %s (TCP 4352)\n------------------------------------------\n%s' "$host" "$out"
-  pause
+  show_output "PJLink probe — $host (TCP 4352)" "$out"
 }
 
 devctl_send_adhoc() {
@@ -832,8 +840,8 @@ m_discovery() {
       fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
            require fping fping || continue
            # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
-           clear; printf '$ fping -a -g %s\n%s\n' "$n" "------------------------------------------"
-           fping -a -g "$n" 2>/dev/null; pause ;;
+           clear; printf '$ fping -a -g %s\n%s\nsweeping…\n' "$n" "------------------------------------------"
+           show_output "fping -a -g $n" "$(fping -a -g "$n" 2>/dev/null)" ;;
       nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue; page sudo nmap -sn "$n" ;;
       nsv) local h; h="$(ask_req "Host:" "$GW")" || continue; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
       dhcp) need_iface || continue; page sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
@@ -873,7 +881,7 @@ m_ipv6() {
       nbr) # Quoted args, no bash -c: prime the neighbour cache, then show it.
            clear; printf '$ ip -6 neigh show dev %s   (after multicast ping)\n%s\n' "$IFACE" "------------------------------------------"
            ping -6 -c2 "ff02::1%$IFACE" >/dev/null 2>&1
-           ip -6 neigh show dev "$IFACE"; pause ;;
+           show_output "ip -6 neigh show dev $IFACE   (after multicast ping)" "$(ip -6 neigh show dev "$IFACE" 2>&1)" ;;
       rtr) require rdisc6 ndisc6 || continue; page rdisc6 "$IFACE" ;;
       lookup) require ndisc6 ndisc6 || continue
               local a; a="$(ask_req "IPv6 address:" "")" || continue; page ndisc6 "$a" "$IFACE" ;;
@@ -1364,14 +1372,12 @@ bt_scan() {
   echo "------------------------------------------"
   echo "Scanning ${secs}s (strongest signal first)…"
   local out; out="$(bt_discover "$secs" "$transport")"
-  echo
   if [ -z "$out" ]; then
-    warn "no devices discovered"
-  else
-    printf '%s\n' "$out" | bt_table
-    echo; echo "$(printf '%s\n' "$out" | grep -c .) device(s).  'BT device info' drills into one."
+    echo; warn "no devices discovered"; pause; return
   fi
-  pause
+  local table; table="$(printf '%s\n' "$out" | bt_table)"
+  table="$table"$'\n\n'"$(printf '%s\n' "$out" | grep -c .) device(s).  'BT device info' drills into one."
+  show_output "sudo btmgmt --timeout $secs find   [$transport]" "$table"
 }
 
 bt_info() {
@@ -1384,12 +1390,8 @@ bt_info() {
   [ ${#args[@]} -eq 0 ] && { clear; warn "no devices in last scan"; pause; return; }
   local pick; pick="$(menu "Pick a device" "${args[@]}")"
   [ -z "$pick" ] && return
-  clear
-  echo "\$ bluetoothctl info $pick"
-  echo "------------------------------------------"
-  bluetoothctl info "$pick"
-  echo; warn "Service/UUID detail is richer for paired or actively-connected devices."
-  pause
+  local info; info="$(bluetoothctl info "$pick" 2>&1)"
+  show_output "bluetoothctl info $pick" "$info"$'\n\n'"! Service/UUID detail is richer for paired or actively-connected devices."
 }
 
 bt_monitor() {
@@ -1728,9 +1730,8 @@ $bt
 RPT
 
   clear; echo "Report written: $f"; echo
-  if have glow; then glow -p "$f"; else cat "$f"; fi
-  echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""
-  pause
+  if have glow; then glow -p "$f"; echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""; pause
+  else show_output "Report written: $f   (PDF: pandoc \"$f\" -o \"${f%.md}.pdf\")" "$(cat "$f")"; fi
 }
 
 gen_sweep() {
@@ -1812,9 +1813,8 @@ $bt
 RPT
 
   clear; echo "Report written: $f"; echo
-  if have glow; then glow -p "$f"; else cat "$f"; fi
-  echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""
-  pause
+  if have glow; then glow -p "$f"; echo; echo "Export a PDF: pandoc \"$f\" -o \"${f%.md}.pdf\""; pause
+  else show_output "Report written: $f   (PDF: pandoc \"$f\" -o \"${f%.md}.pdf\")" "$(cat "$f")"; fi
 }
 
 run_dash() {
@@ -2004,9 +2004,8 @@ hw_check() {
 }
 
 do_selftest() {
-  clear; banner
+  if [ -t 1 ]; then clear; banner; fi   # captured by show_output from the menus
   status_line
-  echo
   say "Core tools"
   local t tools=(nmap arp-scan iperf3 mtr tcpdump dig lldpcli avahi-browse tmux gum)
   for t in "${tools[@]}"; do
@@ -2216,8 +2215,10 @@ quick_run() {
     nsn)      local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
     btscan)   bt_scan ;;
-    selftest) clear; do_selftest; pause ;;
-    hw) clear; hw_check; echo; pause ;;
+    selftest) clear; echo "Running self-test (tools, live network, hardware)…"
+              sudo -n true 2>/dev/null || sudo -v 2>/dev/null   # the nmap sweep inside needs it
+              show_output "netkit selftest" "$(do_selftest 2>&1)" ;;
+    hw)       show_output "netkit hw" "$(hw_check 2>&1)" ;;
     sweep)    gen_sweep "$SITE_SNMP_TARGET" "${SITE_SNMP_COMMUNITY:-public}" ;;
     *) : ;;
   esac

@@ -336,8 +336,12 @@ folder.
   the launcher block. The VT/console fallback stays at the stock 8x16 font (80x30).
 - **Long output scrolls, it doesn't fly past.** Finite commands (arp-scan, nmap,
   iw scan, ethtool, dig, swaks, …) go through `page`, which shows the output inline
-  when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Only live
-  TUIs and streams (wavemon, mtr, tcpdump, btmon, ping, iperf3 …) use `run`.
+  when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Actions that
+  build their own text (Bluetooth scan table, self-test, hardware check, fping,
+  IPv6 neighbours, PJLink probe, report fallback) hand it to `show_output <title>
+  <text>`, the display half of `page`. Only live TUIs and streams (wavemon, mtr,
+  tcpdump, btmon, ping, iperf3 …) use `run`. Never print-then-`pause` a result: on
+  the 20-row panel the top is gone before the pause.
 - Overlay-root, the Pi 5 RTC, and hotspot/AP mode are intentionally **not**
   automated — documented as manual steps rather than applied by the script.
 
