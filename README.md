@@ -323,11 +323,21 @@ folder.
     it) instead of nesting a second `tmux attach`, which tmux refuses.
   On a desktop image the greeter owns the panel, so autostart only shows if the
   unit boots to the console (`sudo systemctl set-default multi-user.target`, or
-  raspi-config → System → Boot). Keep the default 8x16 console font: the 640x480
-  panel gives 80x30 characters, which is what the menus are sized for; a 16x32 font
-  would leave 40x15. The VT blanks after 10 min (kernel default, saves battery) —
-  add `consoleblank=0` to `/boot/firmware/cmdline.txt` only for a permanently
-  displayed dashboard.
+  raspi-config → System → Boot).
+- **Panel kiosk.** When `cage` + `foot` are installed (`netkit setup` adds them),
+  the tty1 login runs `cage -- foot -e tmux … netkit` instead of the bare console:
+  anti-aliased JetBrains Mono at 12pt (64x22 cells), emoji headers, true colour,
+  tap/drag scrolling. netkit quitting relaunches the kiosk; a cage that dies within
+  5 s falls back to the plain console automatically. Font size and colours live in
+  `~/.config/foot/foot.ini` (seeded once by `netkit autostart on`; `size=13` → 58x20,
+  `size=11` → 71x24). Menus size themselves to the terminal: status line + header +
+  list, banner only on terminals ≥ 40 rows; tmux's status bar is hidden under 40
+  rows. `netkit autostart on` is idempotent — re-run it after upgrading to refresh
+  the launcher block. The VT/console fallback stays at the stock 8x16 font (80x30).
+- **Long output scrolls, it doesn't fly past.** Finite commands (arp-scan, nmap,
+  iw scan, ethtool, dig, swaks, …) go through `page`, which shows the output inline
+  when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Only live
+  TUIs and streams (wavemon, mtr, tcpdump, btmon, ping, iperf3 …) use `run`.
 - Overlay-root, the Pi 5 RTC, and hotspot/AP mode are intentionally **not**
   automated — documented as manual steps rather than applied by the script.
 

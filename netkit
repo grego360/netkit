@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.4.0"
+NETKIT_VERSION="4.5.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -87,7 +87,25 @@ banner() {
   fi
 }
 
+# Small-screen layout. The PocketTerm35 panel is 80x30 at the stock console font,
+# ~53x20 at Terminus 24x12 and ~64x22 in foot at 12pt, so every menu screen is:
+# [banner, tall terminals only] + status line + blank + gum header + list + footer.
+menu_show_banner() { [ "${1:-0}" -ge 40 ]; }          # menu_show_banner <rows>
+menu_height() {                                        # menu_height <rows> <banner 0|1>
+  local h=$(( ${1:-24} - 6 )); [ "${2:-0}" = 1 ] && h=$(( h - 5 ))
+  [ "$h" -gt 24 ] && h=24; [ "$h" -lt 5 ] && h=5
+  echo "$h"
+}
+# tmux_tune: inside tmux, drop the status bar when rows are scarce (console or a
+# short terminal) — it costs a line and just says "netkit" on a single-window session.
+tmux_tune() {
+  [ -n "${TMUX:-}" ] || return 0
+  if on_console || [ "$(tput lines 2>/dev/null || echo 24)" -lt 40 ]; then tmux set-option status off; fi
+}
+
 # menu "Header" "key|Label" ... -> prints the chosen key (empty if cancelled).
+# Clears the screen and redraws the status line first (stderr — the caller captures
+# stdout), so an action's leftover output never sits above the next menu.
 # Plain arrow/scroll list (gum choose) — a search box (gum filter) is the wrong
 # widget here: scrolling injects stray input into the query and re-filters the list.
 # A pair whose key is "-" is a non-selectable SECTION HEADER: it's shown as a dim
@@ -101,14 +119,19 @@ menu() {
   local labels=() keys=() pair
   for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
   local chosen="" i
+  local rows show_banner=0 h
+  rows="$(tput lines 2>/dev/null || echo 24)"
+  menu_show_banner "$rows" && show_banner=1
+  h="$(menu_height "$rows" "$show_banner")"
   if have gum; then
     while :; do
+      { clear; [ "$show_banner" = 1 ] && banner; status_line; echo; } >&2
       chosen="$(printf '%s\n' "${labels[@]}" | \
         GUM_CHOOSE_CURSOR="$G_CUR" \
         GUM_CHOOSE_CURSOR_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_SELECTED_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_HEADER_FOREGROUND="$C_ACCENT" \
-        gum choose --header "$header   (esc cancels)" --height 18)"
+        gum choose --header "$header   (esc cancels)" --height "$h")"
       [ -z "$chosen" ] && { echo ""; return; }
       for i in "${!labels[@]}"; do
         if [ "${labels[$i]}" = "$chosen" ]; then
@@ -780,7 +803,7 @@ m_discovery() {
       "n6|IPv6 (neighbours / routers)" \
       "back|‹ back")"
     case "$k" in
-      arp) need_iface || continue; run sudo arp-scan --interface="$IFACE" --localnet ;;
+      arp) need_iface || continue; page sudo arp-scan --interface="$IFACE" --localnet ;;
       fp)  local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue
            require fping fping || continue
            # Quoted arg, no bash -c; stderr (unreachable noise) suppressed inline.
@@ -788,9 +811,9 @@ m_discovery() {
            fping -a -g "$n" 2>/dev/null; pause ;;
       nsn) local n; n="$(ask_cidr "Subnet:" "$CIDR")" || continue; page sudo nmap -sn "$n" ;;
       nsv) local h; h="$(ask_req "Host:" "$GW")" || continue; page sudo nmap -sV -T4 --top-ports 200 "$h" ;;
-      dhcp) need_iface || continue; run sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
-      mdns) run avahi-browse -a -t -r ;;
-      av) run av_browse ;;
+      dhcp) need_iface || continue; page sudo nmap --script broadcast-dhcp-discover -e "$IFACE" ;;
+      mdns) page avahi-browse -a -t -r ;;
+      av) page av_browse ;;
       n6) m_ipv6 ;;
       *) return ;;
     esac
@@ -826,9 +849,9 @@ m_ipv6() {
            clear; printf '$ ip -6 neigh show dev %s   (after multicast ping)\n%s\n' "$IFACE" "------------------------------------------"
            ping -6 -c2 "ff02::1%$IFACE" >/dev/null 2>&1
            ip -6 neigh show dev "$IFACE"; pause ;;
-      rtr) require rdisc6 ndisc6 || continue; run rdisc6 "$IFACE" ;;
+      rtr) require rdisc6 ndisc6 || continue; page rdisc6 "$IFACE" ;;
       lookup) require ndisc6 ndisc6 || continue
-              local a; a="$(ask_req "IPv6 address:" "")" || continue; run ndisc6 "$a" "$IFACE" ;;
+              local a; a="$(ask_req "IPv6 address:" "")" || continue; page ndisc6 "$a" "$IFACE" ;;
       *) return ;;
     esac
   done
@@ -889,8 +912,8 @@ m_wifi() {
       "back|‹ back")"
     case "$k" in
       wm) run wavemon -i "$WIFACE" ;;
-      nm) run nmcli -f IN-USE,SSID,CHAN,SIGNAL,SECURITY device wifi list ;;
-      iw) run sudo iw dev "$WIFACE" scan ;;
+      nm) page nmcli -f IN-USE,SSID,CHAN,SIGNAL,SECURITY device wifi list ;;
+      iw) page sudo iw dev "$WIFACE" scan ;;
       *) return ;;
     esac
   done
@@ -937,11 +960,11 @@ m_dns() {
            ty="$(menu "Record type" "A|A" "AAAA|AAAA" "MX|MX" "TXT|TXT" "NS|NS" "CNAME|CNAME" "SOA|SOA")"
            [ -z "$ty" ] && continue
            page dig +noall +answer "$d" "$ty" ;;
-      ptr) local ip; ip="$(ask_ip "IP:" "$GW")" || continue; run dig -x "$ip" +short ;;
+      ptr) local ip; ip="$(ask_ip "IP:" "$GW")" || continue; page dig -x "$ip" +short ;;
       http) local u; u="$(ask_req "URL:" "${SITE_HTTP_URL:-https://modalav.co.uk}")" || continue
-            if have xh; then run xh -I "$u"; else run curl -sSIL "$u"; fi ;;
+            if have xh; then page xh -I "$u"; else page curl -sSIL "$u"; fi ;;
       port) local h p; h="$(ask_req "Host:" "$GW")" || continue; p="$(ask_req "Port:" "443")" || continue
-            run ncat -zv "$h" "$p" ;;
+            page ncat -zv "$h" "$p" ;;
       smtp) smtp_check ;;
       smtpsend) smtp_send ;;
       *) return ;;
@@ -952,7 +975,7 @@ m_dns() {
 smtp_check() {
   local h p; h="$(ask_req "SMTP server:" "${SITE_SMTP:-$GW}")" || return
   p="$(ask_req "Port:" "${SITE_SMTP_PORT:-587}")" || return
-  if have swaks; then run swaks --server "$h:$p" --quit-after EHLO --timeout 10
+  if have swaks; then page swaks --server "$h:$p" --quit-after EHLO --timeout 10
   else page nmap -Pn -p "$p" --script smtp-commands "$h"; fi
 }
 
@@ -979,7 +1002,7 @@ smtp_send() {
     user="$(ask_req "Auth username:" "")" || return
     cmd+=(--auth --auth-user "$user" --auth-hide-password)
   fi
-  run "${cmd[@]}"
+  page "${cmd[@]}"
 }
 
 m_lldp() {
@@ -1183,7 +1206,7 @@ m_avoip() {
     case "$k" in
       igmp) run sudo tcpdump -i "$IFACE" -n -v igmp ;;
       groups) page sudo nmap --script broadcast-igmp-discovery -e "$IFACE" ;;
-      joined) run ip maddr show ;;
+      joined) page ip maddr show ;;
       omping) if have omping; then
                 local self peer; self="$(ask_req "This device IP:" "${SELFIP:-}")" || continue
                 peer="$(ask_req "Peer IP (also running omping):" "${SITE_PEER:-}")" || continue
@@ -1225,7 +1248,7 @@ m_rf() {
     case "$k" in
       btscan) bt_scan ;;
       btdev) bt_info ;;
-      btadapt) require bluetoothctl bluez || continue; run bluetoothctl show ;;
+      btadapt) require bluetoothctl bluez || continue; page bluetoothctl show ;;
       btmon) bt_monitor ;;
       sub) require rtl_433 "rtl-433 + RTL-SDR dongle" || continue
            local fr; fr="$(ask_req "Frequency:" "433.92M")" || continue
@@ -1243,7 +1266,7 @@ m_rf() {
              echo "------------------------------------------"
              rtl_power -f "${lo}:${hi}:1k" -g 25 -i 1 -1 "$out" && echo "Wrote $out"
              pause ;;
-      sdrtest) require rtl_test rtl-sdr || continue; run rtl_test -t ;;
+      sdrtest) require rtl_test rtl-sdr || continue; page rtl_test -t ;;
       *) return ;;
     esac
   done
@@ -1303,7 +1326,7 @@ bt_scan() {
   bt_preflight || { pause; return; }
   if ! have btmgmt; then
     clear; warn "btmgmt not found — showing cached device list (no live RSSI)"
-    run bluetoothctl devices
+    page bluetoothctl devices
     return
   fi
   local secs t transport
@@ -1398,7 +1421,7 @@ m_report() {
       snap) report_snmp_prompt; gen_report "$RP_HOST" "$RP_COMM" ;;
       sweep) report_snmp_prompt; gen_sweep "$RP_HOST" "$RP_COMM" ;;
       savelast) save_last_report ;;
-      vnstat) run vnstat ;;
+      vnstat) page vnstat ;;
       rec) local f; f="$(report_dir)/session-$(date +%Y%m%d-%H%M).cast"; run asciinema rec "$f" ;;
       *) return ;;
     esac
@@ -1427,15 +1450,15 @@ m_system() {
       "dash|Live tiled dashboard (tmux)" \
       "back|‹ back")"
     case "$k" in
-      if) run ip -c -br addr ;;
+      if) page ip -c -br addr ;;
       eth) require ethtool ethtool || continue
            local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || continue
-           run ethtool "$dev" ;;
+           page ethtool "$dev" ;;
       subnet) require ipcalc ipcalc || continue
               local c; c="$(ask_cidr "Address/CIDR:" "${CIDR:-192.168.1.0/24}")" || continue
-              run ipcalc "$c" ;;
-      rt) run ip -c route ;;
-      dns) if have resolvectl; then run resolvectl status; else run cat /etc/resolv.conf; fi ;;
+              page ipcalc "$c" ;;
+      rt) page ip -c route ;;
+      dns) if have resolvectl; then page resolvectl status; else page cat /etc/resolv.conf; fi ;;
       dash) run_dash ;;
       *) return ;;
     esac
@@ -1840,7 +1863,8 @@ do_setup() {
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
               bluez bluez-tools rfkill rtl-433 rtl-sdr swaks tio xxd
-              mbpoll knxd-tools)
+              mbpoll knxd-tools i2c-tools evtest
+              cage foot fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk (netkit autostart)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"
@@ -1964,7 +1988,7 @@ do_selftest() {
     if have "$t"; then ok "$t"; else warn "$t MISSING"; fi
   done
   say "Optional extras"
-  local x extras=(gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk snmpget fping
+  local x extras=(cage foot gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk snmpget fping
                   ipcalc wakeonlan bluetoothctl btmgmt btmon rfkill rtl_433 rtl_power swaks
                   ptp4l rdisc6 tio socat xxd
                   mbpoll knxtool bacnet)
@@ -2059,6 +2083,17 @@ autostart_block() {
   echo '# >>> netkit autostart >>>'
   # shellcheck disable=SC2016  # must stay literal — evaluated at login, not now
   echo 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "${SSH_TTY:-}" ]; then'
+  echo '  # Kiosk: cage (Wayland) + foot (terminal) give anti-aliased text, emoji and'
+  echo '  # true colour on the panel. netkit quitting relaunches it; a cage that dies'
+  echo '  # within 5 s (no DRM, broken install) drops to the plain console below.'
+  echo '  if command -v cage >/dev/null 2>&1 && command -v foot >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then'
+  echo '    while :; do'
+  # shellcheck disable=SC2016  # literal — evaluated at login, not now
+  echo '      _t0=$(date +%s); cage -- foot -e tmux new-session -A -s netkit netkit'
+  # shellcheck disable=SC2016  # literal — evaluated at login, not now
+  echo '      [ $(( $(date +%s) - _t0 )) -lt 5 ] && break'
+  echo '    done'
+  echo '  fi'
   echo '  export NETKIT_CONSOLE=1'
   echo '  if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s netkit netkit; fi'
   echo '  exec netkit'
@@ -2066,29 +2101,56 @@ autostart_block() {
   echo '# <<< netkit autostart <<<'
 }
 
+# foot_ini_seed: default terminal config for the kiosk, written once (never
+# overwritten — the user owns ~/.config/foot/foot.ini after that).
+foot_ini_seed() {
+  local f="${XDG_CONFIG_HOME:-$HOME/.config}/foot/foot.ini"
+  [ -f "$f" ] && return 0
+  mkdir -p "${f%/*}"
+  cat >"$f" <<'FOOTINI'
+# Seeded by `netkit autostart on` for the PocketTerm35 640x480 panel.
+# JetBrains Mono 12pt = 64x22 cells; size=13 -> 58x20, size=11 -> 71x24.
+[main]
+font=JetBrains Mono:size=12, Noto Color Emoji
+resize-by-cells=no
+pad=4x2
+
+[touch]
+long-press-delay=400
+
+[colors]
+background=0f1115
+foreground=d8dee9
+FOOTINI
+  echo "Wrote $f (font size lives here)."
+}
+
 do_autostart() {
   case "${1:-}" in
     on)
       echo "This will:"
       echo "  • enable console autologin for '$USER' on tty1 (systemd drop-in)"
-      echo "  • launch netkit (inside tmux) on tty1 login via a guarded ~/.bash_profile block"
+      echo "  • launch netkit on tty1 login via a guarded ~/.bash_profile block:"
+      echo "    cage + foot kiosk (inside tmux) when installed, else the plain console"
       echo "It edits system config but is fully reversible: netkit autostart off"
       confirm "Proceed?" || { echo "Cancelled."; return; }
       sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
       # shellcheck disable=SC2016  # $TERM must stay literal — systemd expands it at boot
       printf '[Service]\nExecStart=\nExecStart=-/sbin/agetty --autologin %s --noclear %%I $TERM\n' "$USER" \
         | sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf >/dev/null
-      if ! grep -qF '# >>> netkit autostart >>>' "$HOME/.bash_profile" 2>/dev/null; then
-        # If ~/.bash_profile doesn't exist yet, creating it would stop bash from
-        # reading ~/.profile on login. Seed it to source ~/.profile first.
-        if [ ! -f "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
-          # shellcheck disable=SC2016  # literal — sourced at login, not now
-          printf '%s\n' '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' > "$HOME/.bash_profile"
-        fi
-        autostart_block >> "$HOME/.bash_profile"
+      # If ~/.bash_profile doesn't exist yet, creating it would stop bash from
+      # reading ~/.profile on login. Seed it to source ~/.profile first.
+      if [ ! -f "$HOME/.bash_profile" ] && [ -f "$HOME/.profile" ]; then
+        # shellcheck disable=SC2016  # literal — sourced at login, not now
+        printf '%s\n' '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' > "$HOME/.bash_profile"
       fi
+      # Replace any earlier block so re-running picks up a newer launcher.
+      [ -f "$HOME/.bash_profile" ] && \
+        sed -i '/# >>> netkit autostart >>>/,/# <<< netkit autostart <<</d' "$HOME/.bash_profile"
+      autostart_block >> "$HOME/.bash_profile"
+      foot_ini_seed
       sudo systemctl daemon-reload
-      echo "Autostart enabled. Reboot to test."
+      echo "Autostart enabled. Reboot to test (or: netkit autostart off/on any time)."
       ;;
     off)
       sudo rm -f /etc/systemd/system/getty@tty1.service.d/autologin.conf
@@ -2125,7 +2187,7 @@ quick_run() {
   case "$1" in
     gw)       run ping -c4 "${GW:-1.1.1.1}" ;;
     arp)      need_iface || return; require arp-scan arp-scan || return
-              run sudo arp-scan --interface="$IFACE" --localnet ;;
+              page sudo arp-scan --interface="$IFACE" --localnet ;;
     nsn)      local n; n="$(ask_cidr "Subnet:" "$CIDR")" || return; page sudo nmap -sn "$n" ;;
     lldp)     require lldpcli lldpd || return; page sudo lldpcli show neighbors ;;
     btscan)   bt_scan ;;
@@ -2234,9 +2296,8 @@ trap 'netkit_on_int' INT
 
 first_run_check
 
+tmux_tune
 while true; do
-  clear; banner
-  status_line; echo
   k="$(menu "Pick a category" \
     "-|── everyday ──────────────" \
     "quick|Quick checks" \

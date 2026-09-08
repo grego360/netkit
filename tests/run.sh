@@ -228,6 +228,34 @@ test_sbin_on_path() {
   assert_eq "/usr/sbin:/usr/bin:/usr/local/sbin:/sbin" "$out" "sbin: dirs already present are not duplicated"
 }
 
+test_menu_height() {
+  assert_eq 24 "$(menu_height 30 0)" "menu_height: 30 rows, no banner -> 24"
+  assert_eq 14 "$(menu_height 20 0)" "menu_height: 20 rows (24x12 console font) -> 14"
+  assert_eq 16 "$(menu_height 22 0)" "menu_height: 22 rows (foot 12pt) -> 16"
+  assert_eq 24 "$(menu_height 60 1)" "menu_height: tall terminal with banner caps at 24"
+  assert_eq 19 "$(menu_height 30 1)" "menu_height: banner costs 5 rows"
+  assert_eq 5  "$(menu_height 8 0)"  "menu_height: never below 5"
+  menu_show_banner 40; assert_rc 0 "$?" "menu_show_banner: 40 rows shows the banner"
+  menu_show_banner 30; assert_rc 1 "$?" "menu_show_banner: 30 rows (panel) hides it"
+}
+
+test_tmux_tune() {
+  tmux() { printf 'tmux %s\n' "$*"; }
+  tput() { echo "${FAKE_ROWS:-50}"; }
+  assert_empty "$( unset TMUX; tmux_tune )" "tmux_tune: no-op outside tmux"
+  assert_contains "$( TMUX=x NETKIT_CONSOLE=1 tmux_tune )" "set-option status off" "tmux_tune: hides the bar on the console"
+  assert_contains "$( TMUX=x FAKE_ROWS=22 tmux_tune )"     "set-option status off" "tmux_tune: hides the bar on a short terminal"
+  assert_empty "$( TMUX=x FAKE_ROWS=50 tmux_tune )" "tmux_tune: keeps the bar on a tall terminal"
+}
+
+test_autostart_block_kiosk() {
+  local b; b="$(autostart_block)"
+  assert_contains "$b" 'command -v cage'                     "autostart_block: kiosk only when cage is installed"
+  assert_contains "$b" 'cage -- foot -e tmux new-session -A -s netkit netkit' "autostart_block: cage runs foot running the tmux-wrapped netkit"
+  assert_contains "$b" '-lt 5'                               "autostart_block: a fast-failing cage falls back to the console"
+  assert_contains "$b" 'exec tmux new-session -A -s netkit netkit' "autostart_block: console path still present"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -246,6 +274,9 @@ run_test test_run_dash_nested
 run_test test_hw_check
 run_test test_confirm
 run_test test_sbin_on_path
+run_test test_menu_height
+run_test test_tmux_tune
+run_test test_autostart_block_kiosk
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
