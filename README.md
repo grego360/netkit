@@ -85,8 +85,10 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
   - 67-key keyboard + trackpad = an RP2040 **"My Custom Pico Keyboard"/"Pico Mouse"**
     USB device on the Pi's USB-C port (needs `dtoverlay=dwc2,dr_mode=host`); Fn+−/+
     drives the backlight in hardware (no `/sys/class/backlight`);
-  - Pi5 Active Cooler B on the FAN header — firmware sets
-    `/proc/device-tree/cooling_fan/status` to `okay` only when it detects the fan;
+  - Pi5 Active Cooler B on the FAN header — the Pi 5 firmware does **not** detect
+    this cooler (`/proc/device-tree/cooling_fan/status` stays `disabled`, fan never
+    spins, SoC idles above 60°C). `dtparam=cooling_fan=on` in `/boot/firmware/config.txt`
+    forces the pwm-fan driver and the fan runs (~5300 rpm at boot);
   - UPS board + 5000 mAh cell: no fuel gauge exposed to Linux (`/sys/class/power_supply`
     is empty), battery state comes from the board LEDs only; short-press the Pi 5's
     silicone button to shut down, then double-press the top power button to cut power;

@@ -1915,7 +1915,7 @@ hw_fan() {
   done
   if [ "$st" = okay ] && [ -n "$rpm" ]; then ok "fan $rpm rpm"
   elif [ "$st" = okay ]; then warn "fan enabled but no tach reading"
-  else bad "fan NOT detected by firmware (cooling_fan $st) — reseat the Active Cooler cable on the FAN header"; fi
+  else bad "fan NOT detected by firmware (cooling_fan $st) — add dtparam=cooling_fan=on to /boot/firmware/config.txt (the PocketTerm35 cooler is not auto-detected), else reseat the FAN cable"; fi
 }
 hw_rtc() {
   local n; n="$(hw_read "$NETKIT_SYS/class/rtc/rtc0/name")"
