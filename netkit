@@ -267,7 +267,9 @@ page() {
   if [ "$(printf '%s\n' "$out" | wc -l)" -le "$((rows - 4))" ]; then
     printf '%s\n' "$out"; pause
   elif have gum; then
-    printf '%s\n' "$out" | GUM_PAGER_SHOW_LINE_NUMBERS=false gum pager   # numbers cost 6 cols on a 63-col panel
+    # --show-line-numbers has no env-var form (gum ≥ 0.9 accepts the flag); the
+    # numbers cost 6 columns on the 63-column panel.
+    printf '%s\n' "$out" | gum pager --show-line-numbers=false
   else
     printf '%s\n' "$out" | less -R
   fi
