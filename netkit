@@ -93,7 +93,9 @@ banner() {
 # [banner, tall terminals only] + status line + blank + gum header + list + footer.
 menu_show_banner() { [ "${1:-0}" -ge 40 ]; }          # menu_show_banner <rows>
 menu_height() {                                        # menu_height <rows> <banner 0|1>
-  local h=$(( ${1:-24} - 7 )); [ "${2:-0}" = 1 ] && h=$(( h - 4 ))   # brand line, or the 4-row banner box instead
+  # Reserved: brand line (or the 4-row banner box), status line, gap, gum's
+  # header, its blank/••/blank scroll-indicator block, and its key-help footer.
+  local h=$(( ${1:-24} - 8 )); [ "${2:-0}" = 1 ] && h=$(( h - 3 ))
   [ "$h" -gt 24 ] && h=24; [ "$h" -lt 5 ] && h=5
   echo "$h"
 }
@@ -397,8 +399,12 @@ logo_text() {
   if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit v${NETKIT_VERSION}"
   else big="netKit"; sub="v${NETKIT_VERSION} · network toolkit"; fi
   if have figlet; then
-    local font=standard; [ "$cols" -lt 80 ] && font=small
-    figlet -w "$cols" -f "$font" -- "$big" 2>/dev/null || printf '%s\n' "$big"
+    # Bold "standard" face when its widest line fits the terminal, else "small".
+    local art; art="$(figlet -w 200 -f standard -- "$big" 2>/dev/null)"
+    if [ -z "$art" ] || [ "$(printf '%s\n' "$art" | awk '{ if (length > m) m = length } END { print m+0 }')" -gt "$cols" ]; then
+      art="$(figlet -w "$cols" -f small -- "$big" 2>/dev/null)"
+    fi
+    printf '%s\n' "${art:-$big}"
   else
     printf '%s\n' "$big"
   fi
@@ -414,13 +420,14 @@ brand_line() {
 splash_screen() {
   [ -t 1 ] || return 0
   local cols; cols="$(tput cols 2>/dev/null || echo 80)"
-  clear
+  clear; tput civis 2>/dev/null
   if have gum; then
     logo_text "$cols" | gum style --foreground "$C_ACCENT" --align center --width "$cols" --margin "2 0"
   else
     echo; logo_text "$cols"
   fi
   sleep "${NETKIT_SPLASH_SECS:-1.2}"
+  tput cnorm 2>/dev/null
 }
 
 # ---------- boot splash (plymouth) ----------

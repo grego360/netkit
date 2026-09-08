@@ -229,9 +229,9 @@ test_sbin_on_path() {
 }
 
 test_menu_height() {
-  assert_eq 23 "$(menu_height 30 0)" "menu_height: 30 rows, no banner -> 23 (brand+status+header+footer)"
-  assert_eq 13 "$(menu_height 20 0)" "menu_height: 20 rows (foot 12pt) -> 13"
-  assert_eq 15 "$(menu_height 22 0)" "menu_height: 22 rows -> 15"
+  assert_eq 22 "$(menu_height 30 0)" "menu_height: 30 rows, no banner -> 22 (brand, status, gap, header, gum indicator block, footer)"
+  assert_eq 12 "$(menu_height 20 0)" "menu_height: 20 rows (foot 12pt) -> 12"
+  assert_eq 14 "$(menu_height 22 0)" "menu_height: 22 rows -> 14"
   assert_eq 24 "$(menu_height 60 1)" "menu_height: tall terminal with banner caps at 24"
   assert_eq 19 "$(menu_height 30 1)" "menu_height: banner costs 5 rows"
   assert_eq 5  "$(menu_height 8 0)"  "menu_height: never below 5"
@@ -340,9 +340,11 @@ test_logo_text() {
   out="$(logo_text 64)"
   assert_eq "netKit" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: no brand -> netKit is the logo"
   assert_contains "$out" "v$NETKIT_VERSION" "logo_text: version still shown without a brand"
-  figlet() { echo "FIGLET[$*]"; }; have() { [ "$1" = figlet ]; }
+  figlet() { case "$*" in *standard*) printf '%s\n' "$(printf 'X%.0s' $(seq 1 50))" ;; *) echo "SMALL[$*]" ;; esac; }
+  have() { [ "$1" = figlet ]; }
   NETKIT_BRAND="Modal AV"
-  assert_contains "$(logo_text 64)" "FIGLET[" "logo_text: uses figlet when present"
+  assert_contains "$(logo_text 64)" "XXXXXXXXXX" "logo_text: standard figlet font when its width fits"
+  assert_contains "$(logo_text 40)" "SMALL["     "logo_text: falls back to the small font when standard is too wide"
   NETKIT_BRAND=""
 }
 
