@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.3.0"
+NETKIT_VERSION="4.4.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -32,6 +32,30 @@ if [ -z "${NO_COLOR:-}" ] && [ -t 1 ]; then
   C_HDR=$'\033[1;38;2;33;211;41m'; C_OK=$'\033[1;32m'; C_WARN=$'\033[1;33m'
   C_ERR=$'\033[1;31m'; C_RST=$'\033[0m'; C_DIM=$'\033[2m'
 fi
+
+# ---------- console (Linux VT) fallback ----------
+# The kernel console on the Pi's HDMI output has no emoji glyphs and a limited
+# symbol set. on_console is true on a bare VT (TERM=linux) or when the tty1
+# autostart block exported NETKIT_CONSOLE=1 — needed because inside the tmux
+# wrapper TERM becomes screen/tmux and no longer betrays the VT underneath.
+on_console() { [ "${TERM:-}" = linux ] || [ -n "${NETKIT_CONSOLE:-}" ]; }
+
+# vt_plain <text>: on the console, drop the emoji/non-ASCII decoration from a
+# menu header (em dash becomes a hyphen); elsewhere the text passes through.
+vt_plain() {
+  if on_console; then
+    printf '%s\n' "$1" | LC_ALL=C sed 's/\xe2\x80\x94/-/g; s/[^[:print:]]//g; s/^ *//'
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+# Status/cursor glyphs (set -u safe). ui_glyphs_init picks ASCII on the console.
+G_OK="✓"; G_BAD="✗"; G_CUR="❯ "
+ui_glyphs_init() {
+  if on_console; then G_OK="+"; G_BAD="x"; G_CUR="> "; else G_OK="✓"; G_BAD="✗"; G_CUR="❯ "; fi
+}
+ui_glyphs_init
 
 # require <cmd> [hint]: 0 if present. If missing, offer to run setup now, then
 # return whether the tool is present — so the action proceeds if setup fixed it,
@@ -70,14 +94,14 @@ banner() {
 # --flags: an older gum silently ignores an unknown env var (graceful default
 # styling), whereas an unknown --flag is a hard error that would break the menu.
 menu() {
-  local header="$1"; shift
+  local header; header="$(vt_plain "$1")"; shift
   local labels=() keys=() pair
   for pair in "$@"; do keys+=("${pair%%|*}"); labels+=("${pair#*|}"); done
   local chosen="" i
   if have gum; then
     while :; do
       chosen="$(printf '%s\n' "${labels[@]}" | \
-        GUM_CHOOSE_CURSOR="❯ " \
+        GUM_CHOOSE_CURSOR="$G_CUR" \
         GUM_CHOOSE_CURSOR_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_SELECTED_FOREGROUND="$C_ACCENT" \
         GUM_CHOOSE_HEADER_FOREGROUND="$C_ACCENT" \
@@ -207,9 +231,9 @@ page() {
 }
 
 say()  { printf '\n%s▶ %s%s\n' "$C_HDR"  "$*" "$C_RST"; }
-ok()   { printf '  %s✓%s %s\n'  "$C_OK"   "$C_RST" "$*"; }
+ok()   { printf '  %s%s%s %s\n' "$C_OK"  "$G_OK"  "$C_RST" "$*"; }
 warn() { printf '  %s!%s %s\n'  "$C_WARN" "$C_RST" "$*"; }
-bad()  { printf '  %s✗%s %s\n'  "$C_ERR"  "$C_RST" "$*"; }
+bad()  { printf '  %s%s%s %s\n' "$C_ERR" "$G_BAD" "$C_RST" "$*"; }
 
 need_iface() {
   [ -n "$IFACE" ] && return 0
@@ -1747,15 +1771,25 @@ RPT
 run_dash() {
   require tmux tmux || return
   need_iface || return
-  local S="netkit-dash"
-  tmux kill-session -t "$S" 2>/dev/null
   local pinger="ping ${GW:-1.1.1.1}"; have gping && pinger="gping ${GW:-1.1.1.1}"
-  tmux new-session -d -s "$S" -n dash "watch -n2 'ip -br addr; echo; ip route'"
-  tmux split-window -h -t "$S":0 "$pinger"
-  tmux split-window -v -t "$S":0.0 "mtr ${GW:-1.1.1.1}"
-  tmux split-window -v -t "$S":0.1 "vnstat -l -i $IFACE 2>/dev/null || watch -n2 'cat /proc/net/dev'"
-  tmux select-layout -t "$S":0 tiled
-  tmux attach -t "$S"
+  local first="watch -n2 'ip -br addr; echo; ip route'"
+  local S="netkit-dash" T
+  if [ -n "${TMUX:-}" ]; then
+    # Already inside tmux (the tty1 autostart wraps netkit in a session): a nested
+    # `tmux attach` refuses to run, so open the dashboard as a window of the
+    # current session instead. Ctrl-b & (or the panes exiting) brings the menu back.
+    tmux kill-window -t dash 2>/dev/null
+    T="$(tmux new-window -d -P -F '#{session_name}:#{window_index}' -n dash "$first")"
+  else
+    tmux kill-session -t "$S" 2>/dev/null
+    tmux new-session -d -s "$S" -n dash "$first"
+    T="$S:0"
+  fi
+  tmux split-window -h -t "$T" "$pinger"
+  tmux split-window -v -t "$T.0" "mtr ${GW:-1.1.1.1}"
+  tmux split-window -v -t "$T.1" "vnstat -l -i $IFACE 2>/dev/null || watch -n2 'cat /proc/net/dev'"
+  tmux select-layout -t "$T" tiled
+  if [ -n "${TMUX:-}" ]; then tmux select-window -t "$T"; else tmux attach -t "$S"; fi
 }
 
 # ---------- prebuilt-binary registry (shared by setup + doctor) ----------
@@ -1944,12 +1978,27 @@ do_uninstall() {
 }
 
 # ---------- boot-to-netkit (explicit, reversible) ----------
+# autostart_block: the guarded ~/.bash_profile lines that launch netkit on tty1.
+# Runs netkit inside a tmux session so the HDMI console and an SSH login can share
+# the same screen (`tmux attach -t netkit` from the Mac); bare netkit if tmux is
+# missing. Everything is evaluated at login, hence the literal single quotes.
+autostart_block() {
+  echo '# >>> netkit autostart >>>'
+  # shellcheck disable=SC2016  # must stay literal — evaluated at login, not now
+  echo 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "${SSH_TTY:-}" ]; then'
+  echo '  export NETKIT_CONSOLE=1'
+  echo '  if command -v tmux >/dev/null 2>&1; then exec tmux new-session -A -s netkit netkit; fi'
+  echo '  exec netkit'
+  echo 'fi'
+  echo '# <<< netkit autostart <<<'
+}
+
 do_autostart() {
   case "${1:-}" in
     on)
       echo "This will:"
       echo "  • enable console autologin for '$USER' on tty1 (systemd drop-in)"
-      echo "  • launch netkit on tty1 login via a guarded ~/.bash_profile block"
+      echo "  • launch netkit (inside tmux) on tty1 login via a guarded ~/.bash_profile block"
       echo "It edits system config but is fully reversible: netkit autostart off"
       local a; a="$(ask "Proceed? (y/N):" "N")"
       case "$a" in y|Y|yes|YES) ;; *) echo "Cancelled."; return ;; esac
@@ -1964,12 +2013,7 @@ do_autostart() {
           # shellcheck disable=SC2016  # literal — sourced at login, not now
           printf '%s\n' '[ -f "$HOME/.profile" ] && . "$HOME/.profile"' > "$HOME/.bash_profile"
         fi
-        {
-          echo '# >>> netkit autostart >>>'
-          # shellcheck disable=SC2016  # must stay literal — evaluated at login, not now
-          echo 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "${SSH_TTY:-}" ]; then exec netkit; fi'
-          echo '# <<< netkit autostart <<<'
-        } >> "$HOME/.bash_profile"
+        autostart_block >> "$HOME/.bash_profile"
       fi
       sudo systemctl daemon-reload
       echo "Autostart enabled. Reboot to test."

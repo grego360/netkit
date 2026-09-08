@@ -72,7 +72,8 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 
 ## Environment (assume this; don't re-ask)
 
-- **Device:** Raspberry Pi 5 handheld, Raspberry Pi OS Bookworm, 64-bit (aarch64).
+- **Device:** Raspberry Pi 5 handheld, Raspberry Pi OS (Debian 13 Trixie), 64-bit
+  (aarch64), desktop image with lightdm + labwc installed.
 - **Access:** Pi user `terminosa`, reached via SSH from a Mac (user `moonshaper`)
   or directly. Small screen — keep output concise.
 - **Layout:** `netkit` at `/usr/local/bin/netkit`; config at
@@ -290,7 +291,19 @@ folder.
   ASCII replies are captured to reports like other paged output.
 - **`netkit autostart`** edits system config (systemd getty autologin +
   `~/.bash_profile`); it's gated behind a confirmation and fully reversible with
-  `netkit autostart off`.
+  `netkit autostart off`. The tty1 login runs netkit inside a tmux session named
+  `netkit` (bare netkit if tmux is missing) and exports `NETKIT_CONSOLE=1`, so:
+  - an SSH login can drive the same screen the HDMI monitor shows with
+    `tmux attach -t netkit`;
+  - menu headers drop their emoji and `✓ ✗ ❯` become `+ x >` — the Linux VT has no
+    glyphs for them (also triggers on a bare `TERM=linux` login);
+  - the tiled dashboard opens as a tmux *window* of that session (Ctrl-b & closes
+    it) instead of nesting a second `tmux attach`, which tmux refuses.
+  On a desktop image the greeter owns the monitor, so autostart only shows if the
+  unit boots to the console (`sudo systemctl set-default multi-user.target`, or
+  raspi-config → System → Boot). Worth pairing with a readable console font
+  (`FONTFACE="Terminus" FONTSIZE="16x32"` in `/etc/default/console-setup`) and
+  `consoleblank=0` on the `/boot/firmware/cmdline.txt` line so the VT never blanks.
 - Overlay-root, the Pi 5 RTC, and hotspot/AP mode are intentionally **not**
   automated — documented as manual steps rather than applied by the script.
 

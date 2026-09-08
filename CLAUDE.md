@@ -15,7 +15,7 @@ those conventions, agents, or skills apply here.
 
 A single ~2150-line bash script (`netkit`) that is a categorised network
 testing/inspection/reporting dashboard for a Raspberry Pi 5 handheld (aarch64,
-Raspberry Pi OS Bookworm). No build step, no package, no in-script dependencies.
+Raspberry Pi OS, Debian 13 Trixie). No build step, no package, no in-script dependencies.
 "Installing" = copying the one file to `/usr/local/bin/netkit`. `older_versions/`
 holds prior iterations for reference only — don't edit them.
 

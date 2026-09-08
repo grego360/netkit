@@ -126,6 +126,51 @@ test_snmp_report_block() {
   assert_contains "$(snmp_report_block 1.2.3.4 public)" "## Switch 1.2.3.4 (SNMP v2c)" "report_block renders section header"
 }
 
+test_on_console() {
+  ( TERM=linux; unset NETKIT_CONSOLE; on_console ); assert_rc 0 "$?" "on_console: TERM=linux is the VT"
+  ( TERM=tmux-256color NETKIT_CONSOLE=1; on_console ); assert_rc 0 "$?" "on_console: NETKIT_CONSOLE=1 inside tmux on the VT"
+  ( TERM=xterm-256color; unset NETKIT_CONSOLE; on_console ); assert_rc 1 "$?" "on_console: xterm is not the VT"
+}
+
+test_vt_plain() {
+  assert_eq "Discovery"        "$( TERM=linux; unset NETKIT_CONSOLE; vt_plain '🔍 Discovery' )"   "vt_plain strips emoji on the VT"
+  assert_eq "Site - none"      "$( TERM=linux; unset NETKIT_CONSOLE; vt_plain '🏷 Site — none' )" "vt_plain maps em dash to hyphen on the VT"
+  assert_eq "🔍 Discovery"     "$( TERM=xterm; unset NETKIT_CONSOLE; vt_plain '🔍 Discovery' )"   "vt_plain leaves headers alone off the VT"
+}
+
+test_ui_glyphs() {
+  local vt; vt="$( TERM=linux; unset NETKIT_CONSOLE; NO_COLOR=1; ui_glyphs_init; ok hi; bad no; printf '%s' "$G_CUR" )"
+  assert_contains "$vt" "+ hi" "ui_glyphs: ok() uses ASCII tick on the VT"
+  assert_contains "$vt" "x no" "ui_glyphs: bad() uses ASCII cross on the VT"
+  assert_contains "$vt" "> "   "ui_glyphs: menu cursor is ASCII on the VT"
+  local tty; tty="$( TERM=xterm; unset NETKIT_CONSOLE; NO_COLOR=1; ui_glyphs_init; ok hi )"
+  assert_contains "$tty" "✓ hi" "ui_glyphs: ok() keeps the Unicode tick off the VT"
+}
+
+test_autostart_block() {
+  local b; b="$(autostart_block)"
+  assert_contains "$b" "# >>> netkit autostart >>>" "autostart_block: opening marker"
+  assert_contains "$b" "# <<< netkit autostart <<<" "autostart_block: closing marker"
+  assert_contains "$b" '"$(tty)" = "/dev/tty1"'     "autostart_block: only fires on tty1"
+  assert_contains "$b" 'SSH_TTY'                     "autostart_block: never fires over SSH"
+  assert_contains "$b" 'export NETKIT_CONSOLE=1'     "autostart_block: marks the console for glyph fallback"
+  assert_contains "$b" 'exec tmux new-session -A -s netkit netkit' "autostart_block: wraps netkit in a tmux session"
+  assert_contains "$b" 'exec netkit'                 "autostart_block: falls back to bare netkit without tmux"
+}
+
+test_run_dash_nested() {
+  have()       { [ "$1" = tmux ]; }
+  need_iface() { return 0; }
+  tmux()       { printf 'tmux %s\n' "$*"; }
+  IFACE=eth0; GW=10.0.0.1
+  local nested; nested="$( TMUX=/tmp/tmux-1/default,1,0; run_dash )"
+  assert_contains "$nested" "new-window" "run_dash inside tmux opens a window in the current session"
+  case "$nested" in *"attach"*) printf '  FAIL: run_dash inside tmux must not nest attach\n'; echo x >>"$fails" ;; *) printf '  ok: run_dash inside tmux does not nest attach\n' ;; esac
+  local top; top="$( unset TMUX; run_dash )"
+  assert_contains "$top" "new-session -d -s netkit-dash" "run_dash outside tmux creates its own session"
+  assert_contains "$top" "attach -t netkit-dash"         "run_dash outside tmux attaches to it"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -136,6 +181,11 @@ run_test test_load_site
 run_test test_load_device
 run_test test_snmp_if_table
 run_test test_snmp_report_block
+run_test test_on_console
+run_test test_vt_plain
+run_test test_ui_glyphs
+run_test test_autostart_block
+run_test test_run_dash_nested
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
