@@ -339,10 +339,16 @@ folder.
 - **Branding.** `~/.config/netkit/netkit.conf` (`BRAND=Modal AV`, whitelist-parsed
   like site profiles, never sourced) sets the integrator/customer name shown above
   the fixed **netKit** wordmark: on every menu's top line (or in the banner box on
-  tall terminals), on the launch splash (figlet when installed, plain text
-  otherwise), and — via `netkit splash` / System → Branding — as the plymouth boot
-  splash (ImageMagick renders a 640x480 PNG, the theme copies Pi OS's pix scaling
-  script; `netkit splash off` restores pix). netKit itself is not configurable.
+  tall terminals), on the launch splash, and — via `netkit splash` / System →
+  Branding — as the plymouth boot splash (ImageMagick renders a 640x480 PNG, the
+  theme copies Pi OS's pix scaling script; `netkit splash off` restores pix).
+  The launch splash is the real rendered logo, not ASCII art: ImageMagick draws it
+  on a transparent canvas (cached in `~/.config/netkit/logo.png` per brand), chafa
+  encodes it as a sixel with transparency (foot draws it; through tmux via the DCS
+  passthrough wrapper — chafa's own `--passthrough=tmux` did not render on the
+  unit), placed from the terminal's cell size (`CSI 16 t`). On the plain console it
+  degrades to chafa block art, then figlet, then text. netKit itself is not
+  configurable.
 - **Long output scrolls, it doesn't fly past.** Finite commands (arp-scan, nmap,
   iw scan, ethtool, dig, swaks, …) go through `page`, which shows the output inline
   when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Actions that

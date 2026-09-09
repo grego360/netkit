@@ -389,6 +389,7 @@ set_brand() {
   mkdir -p "${cf%/*}"
   { [ -f "$cf" ] && grep -v '^BRAND=' "$cf"; echo "BRAND=$1"; } > "$cf.tmp" && mv "$cf.tmp" "$cf"
   load_settings
+  rm -f "$NETKIT_CFG_DIR/logo.png" "$NETKIT_CFG_DIR/logo.tag"   # re-render on next splash
   echo "Brand set to: ${NETKIT_BRAND:-<none>}"
 }
 
@@ -416,17 +417,111 @@ brand_line() {
   if [ -n "$NETKIT_BRAND" ]; then printf ' %s%s%s %s· netKit v%s%s\n' "$C_HDR" "$NETKIT_BRAND" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"
   else printf ' %snetKit%s %sv%s · network toolkit%s\n' "$C_HDR" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"; fi
 }
+# ---------- graphical logo in the terminal ----------
+# The kiosk terminal (foot) draws sixel bitmaps, so the launch splash can show the
+# real rendered wordmark instead of ASCII art. chafa does the encoding: its sixel
+# output declares transparency (the terminal background shows through — no colour
+# matching, no stray bands), it wraps the stream for tmux itself, and on the plain
+# console it degrades to block art. Ladder: sixel → block art → figlet/text.
+term_sixel_ok() {
+  case "${TERM:-}" in foot*) return 0 ;; esac
+  if [ -n "${TMUX:-}" ]; then
+    case "$(tmux display -p '#{client_termname}' 2>/dev/null)" in foot*) return 0 ;; esac
+  fi
+  return 1
+}
+# logo_png <out.png>: the wordmark on a transparent background (same faces and
+# colours as the boot splash). Cached per brand by logo_png_cached.
+logo_png() {
+  local im; if have magick; then im=magick; elif have convert; then im=convert; else return 1; fi
+  local big sub
+  if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit"; else big="netKit"; sub="network toolkit"; fi
+  "$im" -background none \
+    \( -size 560x170 -gravity center -fill white -font DejaVu-Sans-Bold caption:"$big" \) \
+    \( -size 560x16 xc:none \) \
+    \( -size 560x80 -gravity center -fill "$C_ACCENT" -font DejaVu-Sans caption:"$sub" \) \
+    -append -gravity center -background none -extent 600x300 "png32:$1"
+}
+# logo_png_cached → path of an up-to-date logo for this brand (or fails).
+logo_png_cached() {
+  local png="$NETKIT_CFG_DIR/logo.png" tag="$NETKIT_CFG_DIR/logo.tag" want="$NETKIT_BRAND|$NETKIT_VERSION"
+  if [ ! -f "$png" ] || [ "$(cat "$tag" 2>/dev/null)" != "$want" ]; then
+    mkdir -p "$NETKIT_CFG_DIR"
+    logo_png "$png" 2>/dev/null || return 1
+    echo "$want" > "$tag"
+  fi
+  echo "$png"
+}
+# tmux_passthrough: stdin → stdout wrapped in tmux's DCS passthrough (inner ESCs
+# doubled). chafa's own --passthrough=tmux did not render on the unit; this does.
+tmux_passthrough() {
+  printf '\033Ptmux;'
+  LC_ALL=C sed 's/\x1b/\x1b\x1b/g'
+  printf '\033\134'   # ESC backslash (octal, keeps shellcheck quiet)
+}
+# parse_cell_reply <CSI 6;H;W[t]> → "W H" (cell size in px), empty if not a reply.
+parse_cell_reply() {
+  local r="${1#*[}"; r="${r%t}"
+  case "$r" in 6\;*\;*) ;; *) return 0 ;; esac
+  local h="${r#6;}"; local w="${h#*;}"; h="${h%%;*}"
+  case "$w$h" in *[!0-9]*|"") return 0 ;; esac
+  echo "$w $h"
+}
+# term_cell_px → "W H": ask the terminal (CSI 16 t; foot answers, tmux forwards),
+# defaulting to 10x22 (JetBrains Mono 12pt) when nothing comes back in time.
+term_cell_px() {
+  local reply="" out=""
+  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
+    exec 3<>/dev/tty
+    printf '\033[16t' >&3
+    IFS= read -r -s -t 0.4 -d t reply <&3 || true   # -s: don't echo the reply onto the screen
+    exec 3>&-
+    out="$(parse_cell_reply "$reply")"
+  fi
+  echo "${out:-10 22}"
+}
+# sixel_px <file> → "W H" from the sixel raster attributes ("1;1;W;H), empty if absent.
+sixel_px() {
+  LC_ALL=C sed -n 's/.*"1;1;\([0-9][0-9]*\);\([0-9][0-9]*\).*/\1 \2/p' "$1" | head -1
+}
+# splash_logo_image: draw the bitmap wordmark centred; 0 if something was drawn.
+splash_logo_image() {
+  have chafa || return 1
+  local cols rows png
+  cols="$(tput cols 2>/dev/null || echo 80)"; rows="$(tput lines 2>/dev/null || echo 24)"
+  png="$(logo_png_cached)" || return 1
+  if term_sixel_ok; then
+    # Encode first, then place: the sixel's own pixel size and the terminal's cell
+    # size give the exact cell box to centre; chafa's alignment whitespace would
+    # otherwise end up inside the tmux passthrough where tmux cannot track it.
+    local six cw ch w h wc hc
+    six="$(mktemp)"
+    chafa -f sixels --polite on --size "$(( cols * 85 / 100 ))x$(( rows - 2 ))" "$png" > "$six" 2>/dev/null
+    read -r w h <<<"$(sixel_px "$six")"
+    if [ -z "$w" ] || [ -z "$h" ]; then rm -f "$six"; return 1; fi
+    read -r cw ch <<<"$(term_cell_px)"
+    wc=$(( (w + cw - 1) / cw )); hc=$(( (h + ch - 1) / ch ))
+    tput cup $(( (rows - hc) / 2 )) $(( (cols - wc) / 2 )) 2>/dev/null
+    if [ -n "${TMUX:-}" ]; then tmux set -p allow-passthrough on 2>/dev/null; tmux_passthrough < "$six"
+    else cat "$six"; fi
+    rm -f "$six"
+  else
+    chafa -f symbols --polite on --align center,center --size "$(( cols - 2 ))x$(( rows - 2 ))" --bg black "$png" 2>/dev/null
+  fi
+}
 # splash_screen: full-screen wordmark for a moment at launch (interactive only).
 splash_screen() {
   [ -t 1 ] || return 0
   local cols; cols="$(tput cols 2>/dev/null || echo 80)"
   clear; tput civis 2>/dev/null
-  if have gum; then
-    logo_text "$cols" | gum style --foreground "$C_ACCENT" --align center --width "$cols" --margin "2 0"
-  else
-    echo; logo_text "$cols"
+  if ! splash_logo_image; then
+    if have gum; then
+      logo_text "$cols" | gum style --foreground "$C_ACCENT" --align center --width "$cols" --margin "2 0"
+    else
+      echo; logo_text "$cols"
+    fi
   fi
-  sleep "${NETKIT_SPLASH_SECS:-1.2}"
+  sleep "${NETKIT_SPLASH_SECS:-1.5}"
   tput cnorm 2>/dev/null
 }
 
@@ -2067,8 +2162,8 @@ do_setup() {
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
               bluez bluez-tools rfkill rtl-433 rtl-sdr swaks tio xxd
-              mbpoll knxd-tools i2c-tools evtest figlet
-              cage foot fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk (netkit autostart)
+              mbpoll knxd-tools i2c-tools evtest figlet chafa imagemagick
+              cage foot fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk + logo (netkit autostart)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"

@@ -360,6 +360,44 @@ test_plymouth_theme_write() {
   rm -rf "$d"
 }
 
+
+
+
+test_term_sixel_ok() {
+  ( TERM=foot; unset TMUX; term_sixel_ok );          assert_rc 0 "$?" "term_sixel_ok: TERM=foot"
+  ( TERM=foot-extra; unset TMUX; term_sixel_ok );    assert_rc 0 "$?" "term_sixel_ok: TERM=foot-*"
+  ( TERM=xterm-256color; unset TMUX; term_sixel_ok ); assert_rc 1 "$?" "term_sixel_ok: xterm is not assumed"
+  ( TERM=linux; unset TMUX; term_sixel_ok );         assert_rc 1 "$?" "term_sixel_ok: the VT cannot"
+  tmux() { echo foot; }
+  ( TERM=tmux-256color; TMUX=x; term_sixel_ok );     assert_rc 0 "$?" "term_sixel_ok: inside tmux whose client is foot"
+  tmux() { echo linux; }
+  ( TERM=tmux-256color; TMUX=x; term_sixel_ok );     assert_rc 1 "$?" "term_sixel_ok: inside tmux on the VT"
+}
+
+test_parse_cell_reply() {
+  assert_eq "10 22" "$(parse_cell_reply $'\e[6;22;10')" "parse_cell_reply: CSI 6;H;W -> 'W H'"
+  assert_eq "10 22" "$(parse_cell_reply $'\e[6;22;10t')" "parse_cell_reply: trailing t tolerated"
+  assert_empty "$(parse_cell_reply 'garbage')" "parse_cell_reply: junk -> empty"
+  assert_empty "$(parse_cell_reply '')" "parse_cell_reply: empty -> empty"
+}
+
+test_tmux_passthrough() {
+  local in out; in="$(printf 'A\033[1mB')"
+  out="$(printf '%s' "$in" | tmux_passthrough | od -An -c | tr -s ' \n' ' ')"
+  assert_contains "$out" "033 P t m u x ;" "tmux_passthrough: opens the DCS tmux; wrapper"
+  assert_contains "$out" "033 033 [ 1 m"   "tmux_passthrough: doubles inner ESCs"
+  case "$out" in *'033 \ '*|*'033 \') printf '  ok: tmux_passthrough: closes with ESC backslash\n' ;; *) printf '  FAIL: tmux_passthrough: closes with ESC backslash (got [%s])\n' "$out"; echo x >>"$fails" ;; esac
+}
+
+test_sixel_px() {
+  local f; f="$(mktemp)"
+  printf '\033P0;1;0q"1;1;530;276#0;2;46;50;46#1;2;56;56;56!10~\033\\' > "$f"
+  assert_eq "530 276" "$(sixel_px "$f")" "sixel_px: reads W H from the raster attributes"
+  printf 'no sixel here' > "$f"
+  assert_empty "$(sixel_px "$f")" "sixel_px: empty when there are no raster attributes"
+  rm -f "$f"
+}
+
 run_test test_framing_socat
 run_test test_framing_tio
 run_test test_hex_norm
@@ -390,6 +428,10 @@ run_test test_brand_valid
 run_test test_set_brand
 run_test test_logo_text
 run_test test_plymouth_theme_write
+run_test test_term_sixel_ok
+run_test test_parse_cell_reply
+run_test test_tmux_passthrough
+run_test test_sixel_px
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"
