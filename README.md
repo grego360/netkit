@@ -342,13 +342,33 @@ folder.
   tall terminals), on the launch splash, and — via `netkit splash` / System →
   Branding — as the plymouth boot splash (ImageMagick renders a 640x480 PNG, the
   theme copies Pi OS's pix scaling script; `netkit splash off` restores pix).
-  The launch splash is the real rendered logo, not ASCII art: ImageMagick draws it
-  on a transparent canvas (cached in `~/.config/netkit/logo.png` per brand), chafa
-  encodes it as a sixel with transparency (foot draws it; through tmux via the DCS
-  passthrough wrapper — chafa's own `--passthrough=tmux` did not render on the
-  unit), placed from the terminal's cell size (`CSI 16 t`). On the plain console it
-  degrades to chafa block art, then figlet, then text. netKit itself is not
-  configurable.
+  The launch splash is ASCII text art so it looks the same in foot, tmux, the
+  Linux console and over SSH: the brand in figlet's `standard` face (`small` when
+  standard is wider than the terminal) with the last word of a multi-word brand
+  in the accent green (figlet'd on its own and joined line by line, `logo_art`),
+  **netKit** in the small face under it, then the version. Without a brand netKit
+  is the big line, all in green. Centring is done in-script (`center_lines`) —
+  `gum style` strips ANSI colour from its input, so it cannot centre the coloured
+  art. No figlet → plain text. netKit itself is not configurable. (A sixel/chafa
+  bitmap splash was tried in 4.6.0 and dropped in 4.7.0 in favour of text art.)
+- **Idle screen & panel off.** Two stages, set in System → Idle screen (or
+  `IDLE_SECS=90` / `BLANK_SECS=300` in `netkit.conf`, 0 disables a stage): after
+  IDLE_SECS the branded screensaver (`netkit screensaver`: wordmark, clock, site,
+  address, moved every 30 s), after BLANK_SECS the panel output is switched off.
+  In the kiosk `cage -- netkit kiosk` starts `swayidle` next to foot; it takes
+  idleness from cage's idle notifier, which counts keyboard, mouse **and touch**
+  (tmux never sees the touchscreen). Stage 1 is `tmux lock-session` with the saver
+  as the lock command: it owns the terminal, so the key or tap that wakes the unit
+  is consumed and never reaches the menu; any input → `netkit idle-wake` turns the
+  output back on (`wlr-randr --on`; cage lacks the output-power protocol, so
+  wlopm does not work, but disabling the output drives DPMS Off and the WS-35-640
+  panel drops its backlight) and kills the saver, which unlocks tmux. Neither
+  stage fires while an action is in the foreground (`idle_can_lock`: only
+  bash/gum/netkit/sh count as idle), so a running capture or throughput test is
+  never hidden. Console fallback: tmux's own `lock-after-time` starts the saver
+  (keyboard idle only, no blanking). Re-run `netkit autostart on` after upgrading
+  to 4.8.0 so the launcher block runs `netkit kiosk`; a running tty1 login shell
+  keeps its old loop until `sudo systemctl restart getty@tty1` (or a reboot).
 - **Long output scrolls, it doesn't fly past.** Finite commands (arp-scan, nmap,
   iw scan, ethtool, dig, swaks, …) go through `page`, which shows the output inline
   when it fits and otherwise opens gum's pager (↑/↓ scroll, q closes). Actions that

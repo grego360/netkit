@@ -245,13 +245,13 @@ test_tmux_tune() {
   assert_empty "$( unset TMUX; tmux_tune )" "tmux_tune: no-op outside tmux"
   assert_contains "$( TMUX=x NETKIT_CONSOLE=1 tmux_tune )" "set-option status off" "tmux_tune: hides the bar on the console"
   assert_contains "$( TMUX=x FAKE_ROWS=22 tmux_tune )"     "set-option status off" "tmux_tune: hides the bar on a short terminal"
-  assert_empty "$( TMUX=x FAKE_ROWS=50 tmux_tune )" "tmux_tune: keeps the bar on a tall terminal"
+  case "$( TMUX=x FAKE_ROWS=50 tmux_tune )" in *"status off"*) printf '  FAIL: tmux_tune: keeps the bar on a tall terminal\n'; echo x >>"$fails" ;; *) printf '  ok: tmux_tune: keeps the bar on a tall terminal\n' ;; esac
 }
 
 test_autostart_block_kiosk() {
   local b; b="$(autostart_block)"
   assert_contains "$b" 'command -v cage'                     "autostart_block: kiosk only when cage is installed"
-  assert_contains "$b" 'cage -- foot -e tmux new-session -A -s netkit netkit' "autostart_block: cage runs foot running the tmux-wrapped netkit"
+  assert_contains "$b" 'cage -- netkit kiosk' "autostart_block: cage runs the kiosk launcher (idle daemon + foot)"
   assert_contains "$b" '-lt 5'                               "autostart_block: a fast-failing cage falls back to the console"
   assert_contains "$b" 'exec tmux new-session -A -s netkit netkit' "autostart_block: console path still present"
 }
@@ -335,17 +335,31 @@ test_logo_text() {
   NETKIT_BRAND="Modal AV"
   local out; out="$(logo_text 64)"
   assert_eq "Modal AV" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: brand on the first line"
-  assert_contains "$out" "netKit v$NETKIT_VERSION" "logo_text: fixed netKit wordmark + version under it"
+  assert_eq "netKit"   "$(printf '%s\n' "$out" | sed -n 2p)" "logo_text: fixed netKit wordmark under the brand"
+  assert_eq "v$NETKIT_VERSION" "$(printf '%s\n' "$out" | sed -n 3p)" "logo_text: version on its own line"
+  C_HDR='<G>'; C_RST='</G>'
+  out="$(logo_text 64)"
+  assert_eq "Modal <G>AV</G>" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: last word of the brand in the accent colour"
+  NETKIT_BRAND="Solo"
+  assert_eq "Solo" "$(logo_text 64 | sed -n 1p)" "logo_text: one-word brand is not coloured"
   NETKIT_BRAND=""
   out="$(logo_text 64)"
-  assert_eq "netKit" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: no brand -> netKit is the logo"
+  assert_eq "<G>netKit</G>" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_text: no brand -> netKit is the logo, in the accent colour"
   assert_contains "$out" "v$NETKIT_VERSION" "logo_text: version still shown without a brand"
-  figlet() { case "$*" in *standard*) printf '%s\n' "$(printf 'X%.0s' $(seq 1 50))" ;; *) echo "SMALL[$*]" ;; esac; }
+  C_HDR=''; C_RST=''
+  # figlet present: each word is its own figlet run so the colour boundary falls between words
+  figlet() { local f; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift ;; --) shift; break ;; esac; shift; done
+             case "$f:$*" in standard:*) printf '%s\n' "[$f:$*]$(printf 'X%.0s' $(seq 1 40))" ;; *) printf '%s\n' "[$f:$*]" ;; esac; }
   have() { [ "$1" = figlet ]; }
+  C_HDR='<G>'; C_RST='</G>'
   NETKIT_BRAND="Modal AV"
-  assert_contains "$(logo_text 64)" "XXXXXXXXXX" "logo_text: standard figlet font when its width fits"
-  assert_contains "$(logo_text 40)" "SMALL["     "logo_text: falls back to the small font when standard is too wide"
-  NETKIT_BRAND=""
+  out="$(logo_text 120)"
+  assert_contains "$out" "[standard:Modal ]" "logo_text: standard figlet font when its width fits"
+  assert_contains "$out" "<G>[standard:AV]"  "logo_text: last word rendered separately, in the accent colour"
+  assert_contains "$out" "[small:netKit]"    "logo_text: netKit in the small face under the brand"
+  out="$(logo_text 60)"
+  assert_contains "$out" "[small:Modal ]<G>[small:AV]" "logo_text: falls back to the small font when standard is too wide"
+  NETKIT_BRAND=""; C_HDR=''; C_RST=''
 }
 
 test_plymouth_theme_write() {
@@ -363,39 +377,85 @@ test_plymouth_theme_write() {
 
 
 
-test_term_sixel_ok() {
-  ( TERM=foot; unset TMUX; term_sixel_ok );          assert_rc 0 "$?" "term_sixel_ok: TERM=foot"
-  ( TERM=foot-extra; unset TMUX; term_sixel_ok );    assert_rc 0 "$?" "term_sixel_ok: TERM=foot-*"
-  ( TERM=xterm-256color; unset TMUX; term_sixel_ok ); assert_rc 1 "$?" "term_sixel_ok: xterm is not assumed"
-  ( TERM=linux; unset TMUX; term_sixel_ok );         assert_rc 1 "$?" "term_sixel_ok: the VT cannot"
-  tmux() { echo foot; }
-  ( TERM=tmux-256color; TMUX=x; term_sixel_ok );     assert_rc 0 "$?" "term_sixel_ok: inside tmux whose client is foot"
-  tmux() { echo linux; }
-  ( TERM=tmux-256color; TMUX=x; term_sixel_ok );     assert_rc 1 "$?" "term_sixel_ok: inside tmux on the VT"
+test_center_lines() {
+  assert_eq "    ab" "$(printf 'ab\n' | center_lines 10)" "center_lines: pads to the centre"
+  assert_eq $'    \e[1mab\e[0m' "$(printf '\e[1mab\e[0m\n' | center_lines 10)" "center_lines: colour escapes do not count as width"
+  assert_eq "abcdefghijk" "$(printf 'abcdefghijk\n' | center_lines 10)" "center_lines: wider than cols -> unpadded"
+  assert_eq $'   a\n  bb' "$(printf 'a\nbb\n' | center_lines 7)" "center_lines: each line centred on its own"
 }
 
-test_parse_cell_reply() {
-  assert_eq "10 22" "$(parse_cell_reply $'\e[6;22;10')" "parse_cell_reply: CSI 6;H;W -> 'W H'"
-  assert_eq "10 22" "$(parse_cell_reply $'\e[6;22;10t')" "parse_cell_reply: trailing t tolerated"
-  assert_empty "$(parse_cell_reply 'garbage')" "parse_cell_reply: junk -> empty"
-  assert_empty "$(parse_cell_reply '')" "parse_cell_reply: empty -> empty"
+test_idle_settings() {
+  local d; d="$(mktemp -d)"
+  NETKIT_CFG_DIR="$d"
+  load_settings
+  assert_eq 90  "$NETKIT_IDLE_SECS"  "load_settings: IDLE_SECS defaults to 90"
+  assert_eq 300 "$NETKIT_BLANK_SECS" "load_settings: BLANK_SECS defaults to 300"
+  printf 'BRAND=Modal AV\nIDLE_SECS=45\nBLANK_SECS=0\n' > "$d/netkit.conf"; load_settings
+  assert_eq 45 "$NETKIT_IDLE_SECS"  "load_settings: IDLE_SECS parsed"
+  assert_eq 0  "$NETKIT_BLANK_SECS" "load_settings: BLANK_SECS=0 (off) parsed"
+  printf 'IDLE_SECS=abc\nBLANK_SECS=-5\n' > "$d/netkit.conf"; load_settings
+  assert_eq 90  "$NETKIT_IDLE_SECS"  "load_settings: non-numeric IDLE_SECS falls back to the default"
+  assert_eq 300 "$NETKIT_BLANK_SECS" "load_settings: negative BLANK_SECS falls back to the default"
+  printf 'BRAND=Modal AV\nIDLE_SECS=45\n' > "$d/netkit.conf"; load_settings
+  set_setting IDLE_SECS 120 >/dev/null; load_settings
+  assert_eq 120 "$NETKIT_IDLE_SECS" "set_setting: replaces the existing line"
+  assert_eq "Modal AV" "$NETKIT_BRAND" "set_setting: leaves other keys alone"
+  assert_eq 1 "$(grep -c '^IDLE_SECS=' "$d/netkit.conf")" "set_setting: exactly one line for the key"
+  set_setting BLANK_SECS 600 >/dev/null; load_settings
+  assert_eq 600 "$NETKIT_BLANK_SECS" "set_setting: adds a missing key"
+  secs_valid 0;   assert_rc 0 "$?" "secs_valid: 0 (off)"
+  secs_valid 90;  assert_rc 0 "$?" "secs_valid: plain number"
+  secs_valid 1e3; assert_rc 1 "$?" "secs_valid: rejects non-digits"
+  secs_valid "";  assert_rc 1 "$?" "secs_valid: rejects empty"
+  secs_valid 100000; assert_rc 1 "$?" "secs_valid: rejects > 86400"
+  rm -rf "$d"
 }
 
-test_tmux_passthrough() {
-  local in out; in="$(printf 'A\033[1mB')"
-  out="$(printf '%s' "$in" | tmux_passthrough | od -An -c | tr -s ' \n' ' ')"
-  assert_contains "$out" "033 P t m u x ;" "tmux_passthrough: opens the DCS tmux; wrapper"
-  assert_contains "$out" "033 033 [ 1 m"   "tmux_passthrough: doubles inner ESCs"
-  case "$out" in *'033 \ '*|*'033 \') printf '  ok: tmux_passthrough: closes with ESC backslash\n' ;; *) printf '  FAIL: tmux_passthrough: closes with ESC backslash (got [%s])\n' "$out"; echo x >>"$fails" ;; esac
+test_idle_can_lock() {
+  idle_can_lock gum;     assert_rc 0 "$?" "idle_can_lock: the menu (gum) is idle"
+  idle_can_lock bash;    assert_rc 0 "$?" "idle_can_lock: a pause prompt (bash) is idle"
+  idle_can_lock netkit;  assert_rc 0 "$?" "idle_can_lock: netkit itself is idle"
+  idle_can_lock tcpdump; assert_rc 1 "$?" "idle_can_lock: never over a running capture"
+  idle_can_lock iperf3;  assert_rc 1 "$?" "idle_can_lock: never over a running test"
+  idle_can_lock "";      assert_rc 1 "$?" "idle_can_lock: unknown (no tmux) -> no"
 }
 
-test_sixel_px() {
-  local f; f="$(mktemp)"
-  printf '\033P0;1;0q"1;1;530;276#0;2;46;50;46#1;2;56;56;56!10~\033\\' > "$f"
-  assert_eq "530 276" "$(sixel_px "$f")" "sixel_px: reads W H from the raster attributes"
-  printf 'no sixel here' > "$f"
-  assert_empty "$(sixel_px "$f")" "sixel_px: empty when there are no raster attributes"
-  rm -f "$f"
+test_saver_offsets() {
+  local i x y
+  for i in 1 2 3 4 5 6 7 8; do
+    read -r x y <<<"$(saver_offsets 63 20 43 12)"
+    [ "$x" -ge 0 ] && [ "$x" -le 20 ] && [ "$y" -ge 0 ] && [ "$y" -le 8 ]; assert_rc 0 "$?" "saver_offsets: inside the screen (got $x $y)"
+  done
+  assert_eq "0 0" "$(saver_offsets 40 10 43 12)" "saver_offsets: art wider/taller than the screen -> 0 0"
+}
+
+test_idle_daemon_args() {
+  NETKIT_IDLE_SECS=90; NETKIT_BLANK_SECS=300
+  local a; a="$(idle_daemon_args | tr '\n' ' ')"
+  assert_contains "$a" "timeout 90 netkit idle-lock resume netkit idle-wake"   "idle_daemon_args: saver stage with its resume"
+  assert_contains "$a" "timeout 300 netkit idle-blank resume netkit idle-wake" "idle_daemon_args: blank stage with its resume"
+  NETKIT_IDLE_SECS=0
+  a="$(idle_daemon_args | tr '\n' ' ')"
+  case "$a" in *idle-lock*) printf '  FAIL: idle_daemon_args: IDLE_SECS=0 drops the saver stage\n'; echo x >>"$fails" ;; *) printf '  ok: idle_daemon_args: IDLE_SECS=0 drops the saver stage\n' ;; esac
+  assert_contains "$a" "timeout 300 netkit idle-blank" "idle_daemon_args: blank stage kept"
+  NETKIT_BLANK_SECS=0
+  assert_empty "$(idle_daemon_args)" "idle_daemon_args: both 0 -> nothing to run"
+  NETKIT_IDLE_SECS=90; NETKIT_BLANK_SECS=300
+}
+
+test_tmux_tune_idle() {
+  tmux() { printf 'tmux %s\n' "$*"; }
+  tput() { echo 20; }
+  NETKIT_IDLE_SECS=90
+  local out; out="$( TMUX=x NETKIT_CONSOLE=1; unset WAYLAND_DISPLAY; tmux_tune )"
+  assert_contains "$out" "set-option lock-command netkit screensaver" "tmux_tune: the saver is tmux's lock command"
+  assert_contains "$out" "set-option lock-after-time 90" "tmux_tune: console -> tmux's own idle timer drives the saver"
+  out="$( TMUX=x WAYLAND_DISPLAY=wayland-0 tmux_tune )"
+  assert_contains "$out" "set-option lock-after-time 0" "tmux_tune: kiosk -> swayidle drives it, tmux timer off"
+  NETKIT_IDLE_SECS=0
+  out="$( TMUX=x NETKIT_CONSOLE=1; unset WAYLAND_DISPLAY; tmux_tune )"
+  assert_contains "$out" "set-option lock-after-time 0" "tmux_tune: IDLE_SECS=0 -> no console timer"
+  NETKIT_IDLE_SECS=90
 }
 
 run_test test_framing_socat
@@ -427,11 +487,13 @@ run_test test_load_settings
 run_test test_brand_valid
 run_test test_set_brand
 run_test test_logo_text
+run_test test_center_lines
+run_test test_idle_settings
+run_test test_idle_can_lock
+run_test test_saver_offsets
+run_test test_idle_daemon_args
+run_test test_tmux_tune_idle
 run_test test_plymouth_theme_write
-run_test test_term_sixel_ok
-run_test test_parse_cell_reply
-run_test test_tmux_passthrough
-run_test test_sixel_px
 
 n="$(wc -l <"$fails" | tr -d ' ')"
 printf '\n%s failure(s)\n' "$n"

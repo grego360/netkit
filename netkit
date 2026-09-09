@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.6.0"
+NETKIT_VERSION="4.8.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -101,9 +101,15 @@ menu_height() {                                        # menu_height <rows> <ban
 }
 # tmux_tune: inside tmux, drop the status bar when rows are scarce (console or a
 # short terminal) — it costs a line and just says "netkit" on a single-window session.
+# Also wires the idle screen: the saver is tmux's lock command everywhere; on the
+# plain console tmux's own keyboard-idle timer starts it, in the kiosk swayidle
+# does (it also sees touch, which tmux never does), so tmux's timer stays off.
 tmux_tune() {
   [ -n "${TMUX:-}" ] || return 0
   if on_console || [ "$(tput lines 2>/dev/null || echo 24)" -lt 40 ]; then tmux set-option status off; fi
+  tmux set-option lock-command "netkit screensaver"
+  if [ -z "${WAYLAND_DISPLAY:-}" ]; then tmux set-option lock-after-time "$NETKIT_IDLE_SECS"
+  else tmux set-option lock-after-time 0; fi
 }
 
 # menu_default_label "key|Label" ... -> label of the first selectable row, so the
@@ -354,15 +360,18 @@ load_site() {
   done < "$cf"
 }
 
-# ---------- unit settings (branding) ----------
+# ---------- unit settings (branding, idle) ----------
 # ~/.config/netkit/netkit.conf — per-unit, not per-site. Same whitelist key=value
 # parser as load_site: the file is never sourced. BRAND is the customer / integrator
 # name shown above the fixed "netKit" wordmark (launch splash, boot splash, every
-# menu's top line). netKit itself is not configurable.
-NETKIT_BRAND=""
+# menu's top line); netKit itself is not configurable. IDLE_SECS / BLANK_SECS are
+# the idle stages (screensaver / panel off), 0 = that stage off.
+NETKIT_BRAND=""; NETKIT_IDLE_SECS=90; NETKIT_BLANK_SECS=300
 settings_file() { echo "$NETKIT_CFG_DIR/netkit.conf"; }
+# secs_valid <n>: whole seconds 0..86400.
+secs_valid() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -le 86400 ]; }
 load_settings() {
-  NETKIT_BRAND=""
+  NETKIT_BRAND=""; NETKIT_IDLE_SECS=90; NETKIT_BLANK_SECS=300
   local cf; cf="$(settings_file)"
   [ -f "$cf" ] || return 0
   local line key val
@@ -371,9 +380,18 @@ load_settings() {
     key="${line%%=*}"; val="${line#*=}"; key="${key// /}"
     case "$key" in
       BRAND) NETKIT_BRAND="$val" ;;
+      IDLE_SECS)  secs_valid "$val" && NETKIT_IDLE_SECS="$val" ;;
+      BLANK_SECS) secs_valid "$val" && NETKIT_BLANK_SECS="$val" ;;
       *) : ;;
     esac
   done < "$cf"
+}
+# set_setting <KEY> <value>: rewrite that key's line (file created if needed), reload.
+set_setting() {
+  local cf; cf="$(settings_file)"
+  mkdir -p "${cf%/*}"
+  { [ -f "$cf" ] && grep -v "^$1=" "$cf"; echo "$1=$2"; } > "$cf.tmp" && mv "$cf.tmp" "$cf"
+  load_settings
 }
 # brand_valid <text>: printable, no '|' (menu separator), <= 32 chars; empty = clear.
 brand_valid() {
@@ -382,34 +400,51 @@ brand_valid() {
   LC_ALL=C printf '%s' "$1" | grep -q '[^[:print:]]' && return 1
   return 0
 }
-# set_brand <text>: rewrite the BRAND line (file created if needed), reload.
+# set_brand <text>: validate, store, report.
 set_brand() {
   brand_valid "$1" || { echo "Brand must be printable, no '|', max 32 chars."; return 1; }
-  local cf; cf="$(settings_file)"
-  mkdir -p "${cf%/*}"
-  { [ -f "$cf" ] && grep -v '^BRAND=' "$cf"; echo "BRAND=$1"; } > "$cf.tmp" && mv "$cf.tmp" "$cf"
-  load_settings
-  rm -f "$NETKIT_CFG_DIR/logo.png" "$NETKIT_CFG_DIR/logo.tag"   # re-render on next splash
+  set_setting BRAND "$1"
   echo "Brand set to: ${NETKIT_BRAND:-<none>}"
 }
 
-# logo_text [cols]: the wordmark as text. Brand big (figlet when installed, plain
-# otherwise) with "netKit vX" under it; without a brand, netKit is the big line.
+# accent_lines: stdin → stdout with every line wrapped in the accent colour (per
+# line, so centring/padding by gum never sits inside a colour span).
+accent_lines() { local l; while IFS= read -r l; do printf '%s%s%s\n' "$C_HDR" "$l" "$C_RST"; done; }
+# logo_art <font> <cols> <head> <tail>: figlet <head><tail> in <font>, <tail> in
+# the accent colour; fails when the widest line would not fit <cols>. The two
+# parts are figlet'd separately and joined line by line so the colour boundary
+# falls exactly between them (figlet pads every line to one width, which keeps
+# the joined block rectangular for centring). Either part may be empty.
+logo_art() {
+  local font="$1" cols="$2" head="$3" tail="$4" art
+  art="$(paste -d '\0' <([ -n "$head" ] && figlet -w 200 -f "$font" -- "$head" 2>/dev/null) \
+                      <([ -n "$tail" ] && figlet -w 200 -f "$font" -- "$tail" 2>/dev/null | accent_lines))"
+  [ -n "$art" ] || return 1
+  local w; w="$(printf '%s\n' "$art" | sed $'s/\e\\[[0-9;]*m//g' | awk '{ if (length > m) m = length } END { print m+0 }')"
+  [ "$w" -le "$cols" ] || return 1
+  printf '%s\n' "$art"
+}
+# logo_text [cols]: the wordmark as ASCII text art — looks the same in foot, tmux,
+# the Linux console and over SSH. Brand big (figlet "standard", or "small" when
+# standard is too wide) with the last word of a multi-word brand in the accent
+# colour, "netKit" in the small face under it, then the version. Without a
+# brand, netKit is the big line, all in the accent colour. Plain text when
+# figlet is missing or nothing fits.
 logo_text() {
-  local cols="${1:-80}" big sub
-  if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit v${NETKIT_VERSION}"
-  else big="netKit"; sub="v${NETKIT_VERSION} · network toolkit"; fi
+  local cols="${1:-80}" head tail sub="" ver="v${NETKIT_VERSION}" art=""
+  if [ -n "$NETKIT_BRAND" ]; then
+    case "$NETKIT_BRAND" in *" "*) head="${NETKIT_BRAND% *} "; tail="${NETKIT_BRAND##* }" ;; *) head="$NETKIT_BRAND"; tail="" ;; esac
+    sub="netKit"
+  else head=""; tail="netKit"; ver="$ver · network toolkit"; fi
   if have figlet; then
-    # Bold "standard" face when its widest line fits the terminal, else "small".
-    local art; art="$(figlet -w 200 -f standard -- "$big" 2>/dev/null)"
-    if [ -z "$art" ] || [ "$(printf '%s\n' "$art" | awk '{ if (length > m) m = length } END { print m+0 }')" -gt "$cols" ]; then
-      art="$(figlet -w "$cols" -f small -- "$big" 2>/dev/null)"
-    fi
-    printf '%s\n' "${art:-$big}"
-  else
-    printf '%s\n' "$big"
+    art="$(logo_art standard "$cols" "$head" "$tail")" || art="$(logo_art small "$cols" "$head" "$tail")" || art=""
+    [ -n "$art" ] && [ -n "$sub" ] && { sub="$(logo_art small "$cols" "$sub" "")" || sub="netKit"; }
   fi
-  printf '%s\n' "$sub"
+  if [ -n "$art" ]; then printf '%s\n' "$art"
+  elif [ -n "$tail" ]; then printf '%s%s%s%s\n' "$head" "$C_HDR" "$tail" "$C_RST"
+  else printf '%s\n' "$head"; fi
+  [ -n "$sub" ] && printf '%s\n' "$sub"
+  printf '%s%s%s\n' "$C_DIM" "$ver" "$C_RST"
 }
 # brand_line: one-line brand · netKit header used above the status line on menus
 # that are too short for the boxed banner.
@@ -417,110 +452,27 @@ brand_line() {
   if [ -n "$NETKIT_BRAND" ]; then printf ' %s%s%s %s· netKit v%s%s\n' "$C_HDR" "$NETKIT_BRAND" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"
   else printf ' %snetKit%s %sv%s · network toolkit%s\n' "$C_HDR" "$C_RST" "$C_DIM" "$NETKIT_VERSION" "$C_RST"; fi
 }
-# ---------- graphical logo in the terminal ----------
-# The kiosk terminal (foot) draws sixel bitmaps, so the launch splash can show the
-# real rendered wordmark instead of ASCII art. chafa does the encoding: its sixel
-# output declares transparency (the terminal background shows through — no colour
-# matching, no stray bands), it wraps the stream for tmux itself, and on the plain
-# console it degrades to block art. Ladder: sixel → block art → figlet/text.
-term_sixel_ok() {
-  case "${TERM:-}" in foot*) return 0 ;; esac
-  if [ -n "${TMUX:-}" ]; then
-    case "$(tmux display -p '#{client_termname}' 2>/dev/null)" in foot*) return 0 ;; esac
-  fi
-  return 1
+# center_lines <cols>: stdin → stdout with each line centred in <cols> columns;
+# colour escapes are ignored when measuring. (gum style strips ANSI from its
+# input, which is why the coloured wordmark is not centred through gum.)
+center_lines() {
+  local cols="$1" l plain pad
+  while IFS= read -r l; do
+    plain="$(printf '%s' "$l" | sed $'s/\e\\[[0-9;]*m//g')"
+    pad=$(( (cols - ${#plain}) / 2 )); [ "$pad" -gt 0 ] || pad=0
+    printf '%*s%s\n' "$pad" '' "$l"
+  done
 }
-# logo_png <out.png>: the wordmark on a transparent background (same faces and
-# colours as the boot splash). Cached per brand by logo_png_cached.
-logo_png() {
-  local im; if have magick; then im=magick; elif have convert; then im=convert; else return 1; fi
-  local big sub
-  if [ -n "$NETKIT_BRAND" ]; then big="$NETKIT_BRAND"; sub="netKit"; else big="netKit"; sub="network toolkit"; fi
-  "$im" -background none \
-    \( -size 560x170 -gravity center -fill white -font DejaVu-Sans-Bold caption:"$big" \) \
-    \( -size 560x16 xc:none \) \
-    \( -size 560x80 -gravity center -fill "$C_ACCENT" -font DejaVu-Sans caption:"$sub" \) \
-    -append -gravity center -background none -extent 600x300 "png32:$1"
-}
-# logo_png_cached → path of an up-to-date logo for this brand (or fails).
-logo_png_cached() {
-  local png="$NETKIT_CFG_DIR/logo.png" tag="$NETKIT_CFG_DIR/logo.tag" want="$NETKIT_BRAND|$NETKIT_VERSION"
-  if [ ! -f "$png" ] || [ "$(cat "$tag" 2>/dev/null)" != "$want" ]; then
-    mkdir -p "$NETKIT_CFG_DIR"
-    logo_png "$png" 2>/dev/null || return 1
-    echo "$want" > "$tag"
-  fi
-  echo "$png"
-}
-# tmux_passthrough: stdin → stdout wrapped in tmux's DCS passthrough (inner ESCs
-# doubled). chafa's own --passthrough=tmux did not render on the unit; this does.
-tmux_passthrough() {
-  printf '\033Ptmux;'
-  LC_ALL=C sed 's/\x1b/\x1b\x1b/g'
-  printf '\033\134'   # ESC backslash (octal, keeps shellcheck quiet)
-}
-# parse_cell_reply <CSI 6;H;W[t]> → "W H" (cell size in px), empty if not a reply.
-parse_cell_reply() {
-  local r="${1#*[}"; r="${r%t}"
-  case "$r" in 6\;*\;*) ;; *) return 0 ;; esac
-  local h="${r#6;}"; local w="${h#*;}"; h="${h%%;*}"
-  case "$w$h" in *[!0-9]*|"") return 0 ;; esac
-  echo "$w $h"
-}
-# term_cell_px → "W H": ask the terminal (CSI 16 t; foot answers, tmux forwards),
-# defaulting to 10x22 (JetBrains Mono 12pt) when nothing comes back in time.
-term_cell_px() {
-  local reply="" out=""
-  if [ -r /dev/tty ] && [ -w /dev/tty ]; then
-    exec 3<>/dev/tty
-    printf '\033[16t' >&3
-    IFS= read -r -s -t 0.4 -d t reply <&3 || true   # -s: don't echo the reply onto the screen
-    exec 3>&-
-    out="$(parse_cell_reply "$reply")"
-  fi
-  echo "${out:-10 22}"
-}
-# sixel_px <file> → "W H" from the sixel raster attributes ("1;1;W;H), empty if absent.
-sixel_px() {
-  LC_ALL=C sed -n 's/.*"1;1;\([0-9][0-9]*\);\([0-9][0-9]*\).*/\1 \2/p' "$1" | head -1
-}
-# splash_logo_image: draw the bitmap wordmark centred; 0 if something was drawn.
-splash_logo_image() {
-  have chafa || return 1
-  local cols rows png
-  cols="$(tput cols 2>/dev/null || echo 80)"; rows="$(tput lines 2>/dev/null || echo 24)"
-  png="$(logo_png_cached)" || return 1
-  if term_sixel_ok; then
-    # Encode first, then place: the sixel's own pixel size and the terminal's cell
-    # size give the exact cell box to centre; chafa's alignment whitespace would
-    # otherwise end up inside the tmux passthrough where tmux cannot track it.
-    local six cw ch w h wc hc
-    six="$(mktemp)"
-    chafa -f sixels --polite on --size "$(( cols * 85 / 100 ))x$(( rows - 2 ))" "$png" > "$six" 2>/dev/null
-    read -r w h <<<"$(sixel_px "$six")"
-    if [ -z "$w" ] || [ -z "$h" ]; then rm -f "$six"; return 1; fi
-    read -r cw ch <<<"$(term_cell_px)"
-    wc=$(( (w + cw - 1) / cw )); hc=$(( (h + ch - 1) / ch ))
-    tput cup $(( (rows - hc) / 2 )) $(( (cols - wc) / 2 )) 2>/dev/null
-    if [ -n "${TMUX:-}" ]; then tmux set -p allow-passthrough on 2>/dev/null; tmux_passthrough < "$six"
-    else cat "$six"; fi
-    rm -f "$six"
-  else
-    chafa -f symbols --polite on --align center,center --size "$(( cols - 2 ))x$(( rows - 2 ))" --bg black "$png" 2>/dev/null
-  fi
-}
-# splash_screen: full-screen wordmark for a moment at launch (interactive only).
+# splash_screen: full-screen ASCII wordmark for a moment at launch (interactive only),
+# centred both ways.
 splash_screen() {
   [ -t 1 ] || return 0
-  local cols; cols="$(tput cols 2>/dev/null || echo 80)"
+  local cols rows art n
+  cols="$(tput cols 2>/dev/null || echo 80)"; rows="$(tput lines 2>/dev/null || echo 24)"
+  art="$(logo_text "$cols")"; n="$(printf '%s\n' "$art" | wc -l | tr -d ' ')"
   clear; tput civis 2>/dev/null
-  if ! splash_logo_image; then
-    if have gum; then
-      logo_text "$cols" | gum style --foreground "$C_ACCENT" --align center --width "$cols" --margin "2 0"
-    else
-      echo; logo_text "$cols"
-    fi
-  fi
+  for (( i = 0; i < (rows - n) / 2; i++ )); do echo; done
+  printf '%s\n' "$art" | center_lines "$cols"
   sleep "${NETKIT_SPLASH_SECS:-1.5}"
   tput cnorm 2>/dev/null
 }
@@ -1748,9 +1700,11 @@ m_system() {
       "dns|DNS resolver status" \
       "dash|Live tiled dashboard (tmux)" \
       "brand|Branding / logo (${NETKIT_BRAND:-none})" \
+      "idle|Idle screen & panel off (${NETKIT_IDLE_SECS}s / ${NETKIT_BLANK_SECS}s)" \
       "back|‹ back")"
     case "$k" in
       brand) m_brand ;;
+      idle) m_idle ;;
       if) page ip -c -br addr ;;
       eth) require ethtool ethtool || continue
            local dev; dev="$(ask_req "Interface:" "${WIRED:-$IFACE}")" || continue
@@ -2162,8 +2116,8 @@ do_setup() {
   say "Installing extra apt packages (MQTT, ethtool, SNMP, Bluetooth, RTL-SDR, mail, OT…)"
   local pkgs=(mosquitto-clients ethtool snmp fping ipcalc wakeonlan unzip
               bluez bluez-tools rfkill rtl-433 rtl-sdr swaks tio xxd
-              mbpoll knxd-tools i2c-tools evtest figlet chafa imagemagick
-              cage foot fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk + logo (netkit autostart)
+              mbpoll knxd-tools i2c-tools evtest figlet imagemagick
+              cage foot swayidle wlr-randr fonts-jetbrains-mono fonts-noto-color-emoji)   # panel kiosk + idle screen (netkit autostart)
   spin "apt update…" sudo apt-get update -y || warn "apt update had issues"
   if spin "Installing apt extras…" sudo DEBIAN_FRONTEND=noninteractive apt-get install -y "${pkgs[@]}"; then
     ok "apt extras installed"
@@ -2286,7 +2240,7 @@ do_selftest() {
     if have "$t"; then ok "$t"; else warn "$t MISSING"; fi
   done
   say "Optional extras"
-  local x extras=(cage foot gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk snmpget fping
+  local x extras=(cage foot swayidle wlr-randr gping bandwhich xh librespeed-cli mosquitto_sub ethtool snmpwalk snmpget fping
                   ipcalc wakeonlan bluetoothctl btmgmt btmon rfkill rtl_433 rtl_power swaks
                   ptp4l rdisc6 tio socat xxd
                   mbpoll knxtool bacnet)
@@ -2372,6 +2326,136 @@ do_uninstall() {
   else echo "Cancelled."; fi
 }
 
+# ---------- idle screen & panel blanking ----------
+# Two stages, both configurable in netkit.conf (0 = off): after IDLE_SECS the
+# branded screensaver (tmux's lock command: it owns the terminal, so the key or tap
+# that wakes the unit is consumed and never reaches the menu); after BLANK_SECS the
+# panel output is switched off (DPMS via wlr-randr — the HDMI panel drops its
+# backlight). In the kiosk swayidle drives both from cage's idle notifier, which
+# counts keyboard, mouse AND touch; tmux's own lock-after-time only counts keys,
+# so it is the console fallback (no blanking there). Neither stage fires over a
+# running action (tcpdump, iperf, wavemon…): idle_can_lock checks the foreground.
+SAVER_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/netkit-saver.pid"
+IDLE_PIDFILE="${XDG_RUNTIME_DIR:-/tmp}/netkit-idle.pid"
+# idle_can_lock <pane_current_command>: only when netkit is sitting at a menu or
+# a prompt — bash (pause/ask), gum (menu/pager), netkit itself, sh.
+idle_can_lock() { case "$1" in bash|gum|netkit|sh) return 0 ;; *) return 1 ;; esac; }
+# idle_busy: the kiosk session's foreground is a real action (or tmux is unreachable).
+idle_busy() {
+  local cmd; cmd="$(tmux display -p -t netkit '#{pane_current_command}' 2>/dev/null)"
+  ! idle_can_lock "$cmd"
+}
+# idle_daemon_args: swayidle's argument list for the configured stages, one per line.
+idle_daemon_args() {
+  if [ "$NETKIT_IDLE_SECS" -gt 0 ]; then
+    printf '%s\n' timeout "$NETKIT_IDLE_SECS" "netkit idle-lock" resume "netkit idle-wake"
+  fi
+  if [ "$NETKIT_BLANK_SECS" -gt 0 ]; then
+    printf '%s\n' timeout "$NETKIT_BLANK_SECS" "netkit idle-blank" resume "netkit idle-wake"
+  fi
+}
+# do_idle_daemon: (re)start swayidle for this Wayland session, replacing an earlier
+# instance (settings changed). Runs until the compositor goes away.
+do_idle_daemon() {
+  [ -n "${WAYLAND_DISPLAY:-}" ] || { echo "idle-daemon: no Wayland session (kiosk only)."; return 1; }
+  have swayidle || { echo "idle-daemon: swayidle not installed (netkit setup)."; return 1; }
+  local old; old="$(cat "$IDLE_PIDFILE" 2>/dev/null)"
+  [ -n "$old" ] && kill "$old" 2>/dev/null
+  local args=(); while IFS= read -r _a; do args+=("$_a"); done < <(idle_daemon_args)
+  [ "${#args[@]}" -gt 0 ] || { rm -f "$IDLE_PIDFILE"; return 0; }
+  echo $$ > "$IDLE_PIDFILE"
+  exec swayidle -w "${args[@]}"
+}
+# idle_daemon_restart: from the menu, after a settings change (kiosk only; no-op elsewhere).
+idle_daemon_restart() {
+  [ -n "${WAYLAND_DISPLAY:-}" ] && have swayidle || return 0
+  setsid -f netkit idle-daemon >/dev/null 2>&1 </dev/null
+}
+# do_idle_lock: stage 1 — start the saver in the kiosk tmux session, unless busy.
+do_idle_lock() {
+  idle_busy && return 0
+  [ -f "$SAVER_PIDFILE" ] && kill -0 "$(cat "$SAVER_PIDFILE")" 2>/dev/null && return 0
+  tmux set-option -t netkit lock-command "netkit screensaver" 2>/dev/null
+  tmux lock-session -t netkit 2>/dev/null
+}
+# wl_outputs: names of the compositor's outputs (wlr-randr's unindented lines).
+wl_outputs() { wlr-randr 2>/dev/null | sed -n 's/^\([^ ]\{1,\}\) ".*/\1/p'; }
+# do_idle_blank: stage 2 — panel off (DPMS), unless busy.
+do_idle_blank() {
+  idle_busy && return 0
+  have wlr-randr || return 1
+  local o; for o in $(wl_outputs); do wlr-randr --output "$o" --off 2>/dev/null; done
+}
+# do_idle_wake: any input — panel back on, saver dismissed (tmux unlocks when it exits).
+do_idle_wake() {
+  if have wlr-randr; then local o; for o in $(wl_outputs); do wlr-randr --output "$o" --on 2>/dev/null; done; fi
+  local pid; pid="$(cat "$SAVER_PIDFILE" 2>/dev/null)"
+  [ -n "$pid" ] && kill "$pid" 2>/dev/null
+  return 0
+}
+# saver_offsets <cols> <rows> <w> <h> → "x y": a random spot that keeps a w×h block
+# on screen (0 0 when it does not fit).
+saver_offsets() {
+  local xs=$(( $1 - $3 )) ys=$(( $2 - $4 )) x=0 y=0
+  [ "$xs" -gt 0 ] && x=$(( RANDOM % (xs + 1) ))
+  [ "$ys" -gt 0 ] && y=$(( RANDOM % (ys + 1) ))
+  echo "$x $y"
+}
+# do_screensaver: the idle screen — wordmark, clock, site and address, moved every
+# 30 s. Exits on any key (consumed here, not by the menu) or on SIGTERM (idle-wake).
+do_screensaver() {
+  echo $$ > "$SAVER_PIDFILE"
+  trap 'tput cnorm 2>/dev/null; clear; rm -f "$SAVER_PIDFILE"; exit 0' TERM INT HUP
+  tput civis 2>/dev/null
+  local cols rows raw art n w x y site pad
+  site="$(cat "$NETKIT_CFG_DIR/active-site" 2>/dev/null)"
+  while :; do
+    cols="$(tput cols 2>/dev/null || echo 80)"; rows="$(tput lines 2>/dev/null || echo 24)"
+    raw="$(logo_text "$cols"; echo
+           printf '%s%s%s%s\n' "$C_DIM" "$(date '+%a %d %b  %H:%M')" "${site:+   $site}" "$C_RST"
+           printf '%s%s%s%s\n' "$C_DIM" "${SELFIP:-no address}" "${IFACE:+ on $IFACE}" "$C_RST")"
+    w="$(printf '%s\n' "$raw" | sed $'s/\e\\[[0-9;]*m//g' | awk '{ if (length > m) m = length } END { print m+0 }')"
+    art="$(printf '%s\n' "$raw" | center_lines "$w")"      # one left-aligned w-wide block
+    n="$(printf '%s\n' "$art" | wc -l | tr -d ' ')"
+    read -r x y <<<"$(saver_offsets "$cols" "$rows" "$w" "$n")"
+    pad="$(printf '%*s' "$x" '')"
+    clear
+    for (( i = 0; i < y; i++ )); do echo; done
+    printf '%s\n' "$art" | sed "s/^/$pad/"
+    read -r -s -n 1 -t 30 && break
+  done
+  tput cnorm 2>/dev/null; clear; rm -f "$SAVER_PIDFILE"
+}
+# do_kiosk: what cage runs — the idle daemon in the background, then the terminal
+# (foot). When foot exits cage exits, and swayidle dies with the compositor.
+do_kiosk() {
+  netkit idle-daemon >/dev/null 2>&1 &
+  exec foot -e tmux new-session -A -s netkit netkit
+}
+# m_idle: System → Idle screen: the two timers and a preview.
+m_idle() {
+  while true; do
+    local k; k="$(menu "💤 Idle screen — saver ${NETKIT_IDLE_SECS}s · panel off ${NETKIT_BLANK_SECS}s (0 = off)" \
+      "idle|Screensaver after… (seconds, 0 = never)" \
+      "blank|Panel off after… (seconds, 0 = never)" \
+      "preview|Preview the screensaver (any key returns)" \
+      "back|‹ back")"
+    case "$k" in
+      idle|blank)
+        local key label v
+        if [ "$k" = idle ]; then key=IDLE_SECS; label="Screensaver after (s):"; v="$NETKIT_IDLE_SECS"
+        else key=BLANK_SECS; label="Panel off after (s):"; v="$NETKIT_BLANK_SECS"; fi
+        v="$(ask "$label" "$v")"
+        clear
+        if secs_valid "$v"; then set_setting "$key" "$v"; idle_daemon_restart; echo "$key = $v"
+        else echo "Whole seconds 0..86400 please."; fi
+        echo "Takes effect now in the kiosk; the console picks it up on the next launch."; pause ;;
+      preview) do_screensaver ;;
+      *) return ;;
+    esac
+  done
+}
+
 # ---------- boot-to-netkit (explicit, reversible) ----------
 # autostart_block: the guarded ~/.bash_profile lines that launch netkit on tty1.
 # Runs netkit inside a tmux session so the HDMI console and an SSH login can share
@@ -2382,12 +2466,13 @@ autostart_block() {
   # shellcheck disable=SC2016  # must stay literal — evaluated at login, not now
   echo 'if [ "$(tty)" = "/dev/tty1" ] && [ -z "${SSH_TTY:-}" ]; then'
   echo '  # Kiosk: cage (Wayland) + foot (terminal) give anti-aliased text, emoji and'
-  echo '  # true colour on the panel. netkit quitting relaunches it; a cage that dies'
-  echo '  # within 5 s (no DRM, broken install) drops to the plain console below.'
+  echo '  # true colour on the panel; "netkit kiosk" starts the idle daemon then foot.'
+  echo '  # netkit quitting relaunches it; a cage that dies within 5 s (no DRM,'
+  echo '  # broken install) drops to the plain console below.'
   echo '  if command -v cage >/dev/null 2>&1 && command -v foot >/dev/null 2>&1 && command -v tmux >/dev/null 2>&1; then'
   echo '    while :; do'
   # shellcheck disable=SC2016  # literal — evaluated at login, not now
-  echo '      _t0=$(date +%s); cage -- foot -e tmux new-session -A -s netkit netkit'
+  echo '      _t0=$(date +%s); cage -- netkit kiosk'
   # shellcheck disable=SC2016  # literal — evaluated at login, not now
   echo '      [ $(( $(date +%s) - _t0 )) -lt 5 ] && break'
   echo '    done'
@@ -2473,6 +2558,7 @@ netkit v${NETKIT_VERSION} — Pi 5 network toolkit
   netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan…)
   netkit brand [name]  show / set the brand shown above netKit (menus, splash)
   netkit splash [off]  install the brand as the boot splash (plymouth) / restore
+  netkit screensaver   the idle screen (any key exits); timers: System → Idle screen
   netkit doctor        check prebuilt-binary matchers vs GitHub
   netkit site [name]   site profiles (prefill prompts per location)
   netkit autostart on|off   boot the unit straight into netkit
@@ -2582,6 +2668,12 @@ case "${1:-}" in
   hw|--hw) hw_check; exit 0 ;;
   brand) if [ $# -ge 2 ]; then set_brand "$2"; else echo "Brand: ${NETKIT_BRAND:-<none>}"; fi; exit 0 ;;
   splash) do_splash "${2:-}"; exit 0 ;;
+  kiosk) do_kiosk ;;
+  idle-daemon) do_idle_daemon; exit $? ;;
+  idle-lock) do_idle_lock; exit 0 ;;
+  idle-blank) do_idle_blank; exit 0 ;;
+  idle-wake) do_idle_wake; exit 0 ;;
+  screensaver) do_screensaver; exit 0 ;;
   doctor|--doctor) do_doctor; exit 0 ;;
   site|--site) do_site "${2:-}"; exit 0 ;;
   autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;
