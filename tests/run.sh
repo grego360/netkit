@@ -407,6 +407,32 @@ test_saver_drain() {
   assert_eq "left:" "$out" "saver_drain: nothing left after a single-byte key"
 }
 
+test_release_helpers() {
+  assert_eq "1.0.14" "$(version_of "v1.0.14")"                                "version_of: plain v-tag"
+  assert_eq "1.21.0" "$(version_of "gping-v1.21.0")"                          "version_of: prefixed tag"
+  assert_eq "1.0.13" "$(version_of "librespeed-cli v1.0.13 (built on 2026-04-30T06:41:58Z)")" "version_of: --version line with a date after it"
+  assert_eq "0.26.1" "$(version_of "xh 0.26.1")"                              "version_of: name + version"
+  assert_empty "$(version_of "no numbers here")"                              "version_of: nothing -> empty"
+  # the bandwhich asset list as GitHub returns it: android sorts before gnu/musl
+  local json='{"tag_name":"v0.23.1","assets":[
+    {"browser_download_url":"https://x/bandwhich-v0.23.1-aarch64-apple-darwin.tar.gz"},
+    {"browser_download_url":"https://x/bandwhich-v0.23.1-aarch64-linux-android.tar.gz"},
+    {"browser_download_url":"https://x/bandwhich-v0.23.1-aarch64-unknown-linux-gnu.tar.gz"},
+    {"browser_download_url":"https://x/bandwhich-v0.23.1-aarch64-unknown-linux-musl.tar.gz"},
+    {"browser_download_url":"https://x/bandwhich-v0.23.1-x86_64-unknown-linux-gnu.tar.gz"}]}'
+  assert_eq "v0.23.1" "$(release_tag "$json")" "release_tag: tag_name"
+  local i; for i in "${!PREBUILT_BIN[@]}"; do [ "${PREBUILT_BIN[$i]}" = bandwhich ] && break; done
+  assert_eq "https://x/bandwhich-v0.23.1-aarch64-unknown-linux-gnu.tar.gz" \
+    "$(release_asset_url "$json" "${PREBUILT_RX[$i]}")" "release_asset_url: bandwhich matcher skips the Android build"
+  assert_empty "$(release_asset_url "$json" 'nothing-matches')" "release_asset_url: no match -> empty"
+  assert_eq 5 "${#PREBUILT_REPOS[@]}" "registry: 5 repos"
+  assert_eq "${#PREBUILT_REPOS[@]}" "${#PREBUILT_RX[@]}"   "registry: RX array parallel"
+  assert_eq "${#PREBUILT_REPOS[@]}" "${#PREBUILT_BIN[@]}"  "registry: BIN array parallel"
+  assert_eq "${#PREBUILT_REPOS[@]}" "${#PREBUILT_NAME[@]}" "registry: NAME array parallel"
+  bin_runs true;  assert_rc 0 "$?" "bin_runs: an executable that runs"
+  bin_runs /no/such/binary 2>/dev/null; assert_rc 1 "$?" "bin_runs: missing / non-executable -> fails"
+}
+
 test_plymouth_theme_write() {
   local d; d="$(mktemp -d)"
   : > "$d/splash.png"
@@ -541,6 +567,7 @@ run_test test_tmux_tune_idle
 run_test test_logo_art
 run_test test_quick_run_ids
 run_test test_saver_drain
+run_test test_release_helpers
 run_test test_plymouth_theme_write
 
 n="$(wc -l <"$fails" | tr -d ' ')"

@@ -97,7 +97,10 @@ names sections, not lines).
    tools (`librespeed-cli`, `gping`, `bandwhich`, `xh`, `bacnet`/rusty-bacnet). Shared by `install_release_bin`
    (used by `do_setup`) and `do_doctor`. **When a project renames its release asset, the
    fix is a one-line regex edit in `PREBUILT_RX`** — netkit falls back to the base tool
-   meanwhile. `netkit doctor` exists to catch this drift proactively.
+   meanwhile. `netkit doctor` catches this drift proactively: it checks each binary
+   actually executes (a wrong-platform asset still looks like aarch64 to `file`) and
+   compares its `--version` with the latest tag; `netkit doctor fix` reinstalls the
+   broken/outdated ones. `install_release_bin` skips present binaries unless forced.
 8. **Subcommands** — `do_setup`, `do_selftest`, `do_doctor`, `do_update`,
    `do_uninstall`, `do_autostart`, `do_kiosk`/`do_idle_*`/`do_screensaver`, `usage`.
 9. **Main dispatch** (`# ---------- main`) — the `NETKIT_LIB=1` source guard (tests load
@@ -123,7 +126,7 @@ on them — asset naming drifts.
 netkit              # interactive dashboard (default)
 netkit setup        # install apt packages + prebuilt aarch64 binaries
 netkit selftest     # confirm tools present + gateway/subnet reachable
-netkit doctor       # confirm the 5 GitHub-binary matchers still resolve
+netkit doctor       # prebuilt binaries: runs + version vs latest release (`doctor fix` reinstalls)
 netkit dash | report | sweep | site [name] | autostart on|off | update [URL]
 ```
 

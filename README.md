@@ -143,7 +143,7 @@ page. If `head -1` shows HTML or a tiny line count, you grabbed the web page.
 ```bash
 netkit setup        # apt packages + prebuilt aarch64 binaries
 netkit selftest     # confirm tools present + gateway/subnet reachable
-netkit doctor       # confirm the 5 GitHub binary matchers still resolve
+netkit doctor       # prebuilt binaries: run + version vs latest release; `doctor fix` reinstalls
 ```
 
 ---
@@ -191,7 +191,7 @@ netkit sweep         full commissioning sweep → branded report
 netkit setup         install/refresh extra deps
 netkit selftest      bench check (tools + live network + hardware)
 netkit hw            PocketTerm35 hardware check (display, touch, keyboard, fan…)
-netkit doctor        check prebuilt-binary matchers vs GitHub
+netkit doctor [fix]  prebuilt binaries vs latest GitHub release; fix = reinstall stale/broken
 netkit site [name]   site profiles (prefill prompts per location)
 netkit autostart on|off   boot the unit straight into netkit
 netkit brand [name]  show / set the brand shown above netKit (menus, launch splash)

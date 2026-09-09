@@ -253,7 +253,9 @@ run() { clear; echo "\$ $*"; echo "------------------------------------------"; 
 # password prompt.
 spin() {
   local title="$1"; shift
-  if have gum; then gum spin --spinner dot --title "$title" -- "$@"
+  # gum's spinner draws with cursor/clear escapes — only on a real terminal (over
+  # `ssh pi netkit doctor fix` or in a log they are just noise).
+  if have gum && [ -t 1 ]; then gum spin --spinner dot --title "$title" -- "$@"
   else echo "… $title"; "$@"; fi
 }
 
@@ -2074,19 +2076,31 @@ PREBUILT_REPOS=(librespeed/speedtest-cli orf/gping imsnif/bandwhich ducaale/xh j
 PREBUILT_RX=(
   'linux_arm64\.tar\.gz$'
   '(aarch64|arm64).*linux.*tar\.gz$|linux.*(musl|gnu).*(aarch64|arm64).*tar\.gz$'
-  'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
+  'aarch64-unknown-linux-(musl|gnu).*tar\.gz$'   # no loose fallback: aarch64-linux-android sorts first and would win
   'aarch64-unknown-linux-(musl|gnu).*tar\.gz$|aarch64.*linux.*tar\.gz$'
   'bacnet.*linux.*arm64$'
 )
 PREBUILT_BIN=(librespeed-cli gping bandwhich xh bacnet)
 PREBUILT_NAME=('librespeed-cli (WAN speed test)' 'gping (ping graph)' 'bandwhich (per-process bw)' 'xh (modern curl)' 'bacnet (rusty-bacnet)')
 
-install_release_bin() { # repo  asset_regex  binname  friendly
-  local repo="$1" rx="$2" bin="$3" friendly="${4:-$3}" url tmp found
-  if have "$bin"; then ok "$friendly already present"; return 0; fi
-  url="$(curl -fsSL "https://api.github.com/repos/$repo/releases/latest" 2>/dev/null \
-        | jq -r '.assets[].browser_download_url' 2>/dev/null \
-        | grep -Ei "$rx" | head -n1)"
+# release_json <repo>: the latest-release document from GitHub (empty on failure).
+release_json() { curl -fsSL "https://api.github.com/repos/$1/releases/latest" 2>/dev/null; }
+# release_asset_url <json> <regex>: first asset download URL matching <regex>.
+release_asset_url() { printf '%s' "$1" | jq -r '.assets[].browser_download_url' 2>/dev/null | grep -Ei "$2" | head -n1; }
+# release_tag <json>: the release's tag name.
+release_tag() { printf '%s' "$1" | jq -r '.tag_name // empty' 2>/dev/null; }
+# version_of <text>: the first dotted version number in <text> — works on tags
+# ("v1.0.14", "gping-v1.21.0") and on --version output ("xh 0.26.1", "gping 1.20.2").
+version_of() { printf '%s' "$1" | grep -oE '[0-9]+\.[0-9]+(\.[0-9]+)?' | head -n1; }
+# bin_runs <bin>: 0 when the binary executes at all. A wrong-platform download (the
+# bandwhich Android build asks for /system/bin/linker64) fails with 126/127 here
+# while still looking like an aarch64 ELF to `file`.
+bin_runs() { "$1" --version >/dev/null 2>&1; local rc=$?; [ "$rc" -ne 126 ] && [ "$rc" -ne 127 ]; }
+
+install_release_bin() { # repo  asset_regex  binname  friendly  [force]
+  local repo="$1" rx="$2" bin="$3" friendly="${4:-$3}" force="${5:-}" url tmp found
+  if [ -z "$force" ] && have "$bin"; then ok "$friendly already present"; return 0; fi
+  url="$(release_asset_url "$(release_json "$repo")" "$rx")"
   if [ -z "$url" ]; then warn "$friendly: no matching aarch64 asset found — skipped"; return 1; fi
   tmp="$(mktemp -d)"
   if spin "$friendly: downloading…" curl -fsSL "$url" -o "$tmp/dl"; then
@@ -2270,28 +2284,47 @@ do_selftest() {
   echo
 }
 
-do_doctor() {
-  echo "netkit doctor — checking prebuilt-binary release matchers against GitHub"
+do_doctor() { # [fix]
+  local fix="${1:-}"
+  echo "netkit doctor — prebuilt binaries: installed vs the latest GitHub release"
   echo
-  local i url bp ftype
+  local i json url tag bin have_v want_v todo=()
   for i in "${!PREBUILT_REPOS[@]}"; do
-    url="$(curl -fsSL "https://api.github.com/repos/${PREBUILT_REPOS[$i]}/releases/latest" 2>/dev/null \
-          | jq -r '.assets[].browser_download_url' 2>/dev/null \
-          | grep -Ei "${PREBUILT_RX[$i]}" | head -n1)"
-    if have "${PREBUILT_BIN[$i]}"; then
-      # Show the binary's arch + linking so a wrong-arch download or a surprising
-      # glibc-vs-static link (the rusty-bacnet caveat) is visible without running it.
-      bp="$(command -v "${PREBUILT_BIN[$i]}")"; ftype=""
-      have file && ftype="$(file -b "$bp" 2>/dev/null | cut -c1-46)"
-      printf '  installed  %-13s %s\n' "${PREBUILT_BIN[$i]}" "${ftype:+($ftype)}"
+    bin="${PREBUILT_BIN[$i]}"
+    json="$(release_json "${PREBUILT_REPOS[$i]}")"
+    url="$(release_asset_url "$json" "${PREBUILT_RX[$i]}")"; tag="$(release_tag "$json")"
+    want_v="$(version_of "$tag")"
+    if have "$bin"; then
+      if ! bin_runs "$bin"; then
+        printf '  %sBROKEN%s     %-13s does not run — %s\n' "$C_ERR" "$C_RST" "$bin" "$(file -b "$(command -v "$bin")" 2>/dev/null | cut -c1-60)"
+        todo+=("$i")
+      else
+        have_v="$(version_of "$("$bin" --version 2>&1 | head -n1)")"
+        if [ -n "$want_v" ] && [ "$have_v" != "$want_v" ]; then
+          printf '  %soutdated%s   %-13s %s → %s\n' "$C_WARN" "$C_RST" "$bin" "${have_v:-?}" "$want_v"
+          todo+=("$i")
+        else
+          printf '  %sok%s         %-13s %s\n' "$C_OK" "$C_RST" "$bin" "${have_v:-?}"
+        fi
+      fi
     elif [ -n "$url" ]; then
-      printf '  resolves   %-13s -> %s\n' "${PREBUILT_BIN[$i]}" "$(basename "$url")"
+      printf '  resolves   %-13s -> %s\n' "$bin" "$(basename "$url")"
     else
-      printf '  NO MATCH   %-13s (asset naming may have changed)\n' "${PREBUILT_BIN[$i]}"
+      printf '  %sNO MATCH%s   %-13s (asset naming may have changed)\n' "$C_ERR" "$C_RST" "$bin"
     fi
   done
   echo
-  echo "‘NO MATCH’ means the matcher needs updating; ‘resolves’ means setup would install it."
+  if [ "${#todo[@]}" -eq 0 ]; then echo "All prebuilt binaries run and are current."; return 0; fi
+  if [ "$fix" != fix ]; then
+    echo "'netkit doctor fix' reinstalls the BROKEN / outdated ones from the latest release."
+    echo "‘NO MATCH’ means the matcher (PREBUILT_RX) needs updating."
+    return 1
+  fi
+  echo "Reinstalling ${#todo[@]} binar$( [ "${#todo[@]}" -eq 1 ] && echo y || echo ies )…"
+  for i in "${todo[@]}"; do
+    install_release_bin "${PREBUILT_REPOS[$i]}" "${PREBUILT_RX[$i]}" "${PREBUILT_BIN[$i]}" "${PREBUILT_NAME[$i]}" force
+  done
+  return 0
 }
 
 do_update() {
@@ -2568,7 +2601,7 @@ netkit v${NETKIT_VERSION} — Pi 5 network toolkit
   netkit brand [name]  show / set the brand shown above netKit (menus, splash)
   netkit splash [off]  install the brand as the boot splash (plymouth) / restore
   netkit screensaver   the idle screen (any key exits); timers: System → Idle screen
-  netkit doctor        check prebuilt-binary matchers vs GitHub
+  netkit doctor [fix]  prebuilt binaries vs latest GitHub release; fix = reinstall stale/broken
   netkit site [name]   site profiles (prefill prompts per location)
   netkit autostart on|off   boot the unit straight into netkit
   netkit update [URL]  re-pull this script from a Raw gist URL
@@ -2683,7 +2716,7 @@ case "${1:-}" in
   idle-blank) do_idle_blank; exit 0 ;;
   idle-wake) do_idle_wake; exit 0 ;;
   screensaver) do_screensaver; exit 0 ;;
-  doctor|--doctor) do_doctor; exit 0 ;;
+  doctor|--doctor) do_doctor "${2:-}"; exit $? ;;
   site|--site) do_site "${2:-}"; exit 0 ;;
   autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;
   update|--update) do_update "${2:-}"; exit 0 ;;
