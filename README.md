@@ -90,7 +90,12 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
     spins, SoC idles above 60°C). `dtparam=cooling_fan=on` in `/boot/firmware/config.txt`
     forces the pwm-fan driver and the fan runs (~5300 rpm at boot);
   - UPS board + 5000 mAh cell: no fuel gauge exposed to Linux (`/sys/class/power_supply`
-    is empty), battery state comes from the board LEDs only; short-press the Pi 5's
+    is empty, I2C-1 carries only the GT911 touch controller, the keyboard MCU's serial
+    port is a CircuitPython console) — battery state comes from the board LEDs only.
+    What the Pi does know is its 5 V input rail (`vcgencmd pmic_read_adc EXT5V_V`) and
+    the firmware under-voltage flags (`get_throttled`); netkit shows that as `pwr 5.2V`
+    in the status bar / idle screen / `netkit hw`, red `UNDERVOLT` when the rail sags
+    (UPS running out, poor cable). Short-press the Pi 5's
     silicone button to shut down, then double-press the top power button to cut power;
   - Pi 5 onboard RTC (`rpi-rtc`), no backup cell;
   - EEPROM: Waveshare's FAQ wants `NET_INSTALL_AT_POWER_ON=0` (the net-install splash
@@ -101,9 +106,12 @@ The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
   `~/.config/netkit/`; reports under `~/netkit-reports/`.
 - **Connectivity:** WiFi (`wlan0`) and/or wired (`eth0`); netkit re-detects the
   active interface each launch.
-- **Status bar:** shows iface / IP / gateway / WiFi / active site, a green ● / red ●
-  gateway-reachability dot (cached ~15s so redraws stay snappy), plus a `bat: NN%`
-  readout when a UPS/HAT exposes a battery via `/sys/class/power_supply`.
+- **Status bar:** iface / IP / gateway (green ● / red ● reachability dot, cached ~15s
+  so redraws stay snappy) / active site / power (`bat NN%` when a UPS/HAT exposes a
+  battery via `/sys/class/power_supply`, else the `pwr` input-rail reading) / WiFi
+  (only when it is not already the active interface). Segments are dropped from the
+  end when the terminal is narrower than the row — a wrapped row would steal a menu
+  line on the 63-column panel; the first three always show.
 
 ---
 
@@ -170,13 +178,18 @@ scp netkit terminosa@10.1.20.176:/tmp/netkit
 ssh terminosa@10.1.20.176 'sudo install -m 0755 /tmp/netkit /usr/local/bin/netkit && netkit version'
 ```
 
-**Pull on the Pi** (`netkit update`) is the alternative when you can't easily
-SSH in — it re-pulls from a stored Raw gist URL and refuses anything whose first
-line isn't the bash shebang:
+**Pull on the Pi** (`netkit update`, or System → "Update netkit") is the alternative
+when you can't easily SSH in — it installs the published script from GitHub `main`
+(`raw.githubusercontent.com/grego360/netkit/main/netkit`), refuses anything whose
+first line isn't the bash shebang, and refuses to downgrade unless forced. Once a
+day netkit fetches the published version line in the background (5 s cap, stamp in
+`~/.config/netkit/update.check`) and the System row says `update vX.Y.Z` when it is
+newer.
 
 ```bash
-netkit update 'https://gist.githubusercontent.com/<user>/<id>/raw/netkit'   # URL remembered after first use
-netkit update                                                                # reuse stored URL
+netkit update                                   # from GitHub main
+netkit update 'https://host/path/netkit'        # another Raw URL, remembered
+NETKIT_UPDATE_FORCE=1 netkit update             # deliberate rollback
 ```
 
 ---
@@ -196,7 +209,7 @@ netkit site [name]   site profiles (prefill prompts per location)
 netkit autostart on|off   boot the unit straight into netkit
 netkit brand [name]  show / set the brand shown above netKit (menus, launch splash)
 netkit splash [off]  install the brand as the plymouth boot splash / restore Pi OS's
-netkit update [URL]  re-pull this script from a Raw gist URL
+netkit update [URL]  install the published script (GitHub main, or a Raw URL given once)
 netkit uninstall     remove the netkit binary
 netkit version       print version
 netkit help          usage
@@ -283,6 +296,16 @@ Written under `~/netkit-reports/<site>/<date>/` (site = `default` if none active
 - `sweep-*.csv` — RTL-SDR spectrum sweep
 
 Convert any report to PDF: `pandoc <file>.md -o <file>.pdf`.
+
+Housekeeping (Reporting → "Manage reports"): size per site, delete day folders
+older than N days (chosen by folder name, so a wrong clock at write time does not
+matter; lists then confirms), export the whole tree to a USB stick (removable
+partition with a filesystem; mounted via udisks or sudo if needed, synced and
+unmounted after the copy so the stick can be pulled).
+
+System → "OS updates" runs apt from the menu (check, full-upgrade, autoremove,
+reboot; the row flags a pending reboot). System → "Prebuilt tools" pages
+`netkit doctor` and offers `doctor fix` when anything is broken or outdated.
 
 ---
 

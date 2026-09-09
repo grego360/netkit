@@ -79,20 +79,27 @@ names sections, not lines).
    parser** — the `.conf` is *never* sourced/executed (security boundary; don't replace
    it with `source`). Fields populate `SITE_*` globals consumed by menu actions.
    Whitelisted keys include `SNMP_TARGET` (switch IP for the report SNMP/PoE section).
-4. **Live network facts** (`# ---------- live network facts`) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
+4. **Update check** (`# ---------- update check`) — once a day, in the background,
+   the published script's version line is fetched (GitHub main by default) into
+   `update.check`; `update_available` only reads that stamp. **Power input**
+   (`# ---------- power input`) — the Pi 5 PMIC's 5 V rail + under-voltage flags,
+   the only battery-related signal this hardware has (no fuel gauge anywhere).
+   `status_line` is width-aware (`status_fit`): never let it wrap.
+5. **Live network facts** (`# ---------- live network facts`) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
    `WIRED` detected at launch from `ip`/sysfs. Re-detected every run; menus read these.
-5. **Category menus** `m_*` (`# ---------- categories`) — one function per dashboard
+6. **Category menus** `m_*` (`# ---------- categories`) — one function per dashboard
    category (`m_discovery`, `m_link`, `m_wifi`, `m_packet`, `m_dns`, `m_lldp`, `m_snmp`,
    `m_devctl`, `m_avoip`, `m_iot`, `m_rf`, `m_ot`, `m_report`, `m_brand`, `m_system`,
    `m_site`). Each builds a `menu` and dispatches to actions wrapped in `run`/`page`.
-   Three menus live outside that block, next to the code they front: `m_idle` (under
+   Some menus live outside that block, next to the code they front: `m_idle` (under
    `# ---------- idle screen & panel blanking`, with the `idle-*`/`screensaver`/`kiosk`
-   subcommand handlers), `m_quick` (`# ---------- quick actions`, a dispatch table) and
-   `m_site` (after the site-profile helpers).
-6. **Report generators** — `gen_report` (snapshot), `gen_sweep` (branded commissioning
+   subcommand handlers), `m_quick` (`# ---------- quick actions`, a dispatch table),
+   `m_site` (after the site-profile helpers), `m_reports_manage` (`# ---------- report
+   housekeeping`), `m_osupdate` (just above `m_system`).
+7. **Report generators** — `gen_report` (snapshot), `gen_sweep` (branded commissioning
    sweep), `run_dash` (tmux tiled view). Output goes under `report_dir`:
    `~/netkit-reports/<site|default>/<date>/`.
-7. **Prebuilt-binary registry** (`# ---------- prebuilt-binary registry`) — four parallel arrays
+8. **Prebuilt-binary registry** (`# ---------- prebuilt-binary registry`) — four parallel arrays
    `PREBUILT_REPOS / PREBUILT_RX / PREBUILT_BIN / PREBUILT_NAME` for the GitHub-release
    tools (`librespeed-cli`, `gping`, `bandwhich`, `xh`, `bacnet`/rusty-bacnet). Shared by `install_release_bin`
    (used by `do_setup`) and `do_doctor`. **When a project renames its release asset, the
@@ -101,9 +108,9 @@ names sections, not lines).
    actually executes (a wrong-platform asset still looks like aarch64 to `file`) and
    compares its `--version` with the latest tag; `netkit doctor fix` reinstalls the
    broken/outdated ones. `install_release_bin` skips present binaries unless forced.
-8. **Subcommands** — `do_setup`, `do_selftest`, `do_doctor`, `do_update`,
+9. **Subcommands** — `do_setup`, `do_selftest`, `do_doctor`, `do_update`,
    `do_uninstall`, `do_autostart`, `do_kiosk`/`do_idle_*`/`do_screensaver`, `usage`.
-9. **Main dispatch** (`# ---------- main`) — the `NETKIT_LIB=1` source guard (tests load
+10. **Main dispatch** (`# ---------- main`) — the `NETKIT_LIB=1` source guard (tests load
    functions without running), `load_site`, `load_settings`, then a `case` on `$1` for
    subcommands; no arg → the interactive category loop.
 

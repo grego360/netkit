@@ -433,6 +433,64 @@ test_release_helpers() {
   bin_runs /no/such/binary 2>/dev/null; assert_rc 1 "$?" "bin_runs: missing / non-executable -> fails"
 }
 
+test_update_check() {
+  version_gt 4.9.0 4.8.0;  assert_rc 0 "$?" "version_gt: minor bump is newer"
+  version_gt 4.10.0 4.9.0; assert_rc 0 "$?" "version_gt: numeric, not lexical (10 > 9)"
+  version_gt 4.8.0 4.8.0;  assert_rc 1 "$?" "version_gt: equal is not newer"
+  version_gt 4.8.0 4.9.0;  assert_rc 1 "$?" "version_gt: older is not newer"
+  version_gt 5 4.9.9;      assert_rc 0 "$?" "version_gt: short version compares (missing parts = 0)"
+  version_gt 4.8 4.8.0;    assert_rc 1 "$?" "version_gt: 4.8 == 4.8.0"
+  version_gt "" 4.8.0;     assert_rc 1 "$?" "version_gt: empty is never newer"
+  assert_eq "4.9.0" "$(script_version "$(printf '#!/usr/bin/env bash\nset -uo pipefail\nNETKIT_VERSION=\"4.9.0\"\nX=1\n')")" "script_version: reads the assignment"
+  assert_empty "$(script_version "<html>not a script</html>")" "script_version: HTML -> empty"
+  update_stamp_fresh "4.9.0 1000" 2000;          assert_rc 0 "$?" "update_stamp_fresh: recent stamp is fresh"
+  update_stamp_fresh "4.9.0 1000" $((1000+86400)); assert_rc 1 "$?" "update_stamp_fresh: a day old is stale"
+  update_stamp_fresh "" 2000;                    assert_rc 1 "$?" "update_stamp_fresh: no stamp is stale"
+  update_stamp_fresh "garbage" 2000;             assert_rc 1 "$?" "update_stamp_fresh: malformed stamp is stale"
+  # update_available reads the stamp; the refresh it may spawn is neutralised
+  local d; d="$(mktemp -d)"; NETKIT_CFG_DIR="$d"; update_refresh() { :; }
+  printf '4.9.5 %s\n' "$(date +%s)" > "$d/update.check"
+  assert_eq "4.9.5" "$(NETKIT_VERSION=4.9.0 update_available)" "update_available: newer published version is reported"
+  assert_empty "$(NETKIT_VERSION=4.9.5 update_available)" "update_available: same version -> nothing"
+  printf '? %s\n' "$(date +%s)" > "$d/update.check"
+  assert_empty "$(NETKIT_VERSION=4.9.0 update_available)" "update_available: failed fetch (?) -> nothing"
+  rm -rf "$d"
+}
+
+test_power_parse() {
+  assert_eq "5.22V" "$(power_parse '     EXT5V_V volt(24)=5.22734000V' 0x0)"       "power_parse: rail voltage, two decimals"
+  assert_eq "4.63V UNDERVOLT" "$(power_parse 'EXT5V_V volt(24)=4.63100000V' 0x50001)" "power_parse: bit 0 = under-voltage now"
+  assert_eq "5.10V (undervolt seen)" "$(power_parse 'EXT5V_V volt(24)=5.10000000V' 0x50000)" "power_parse: bit 16 = has occurred"
+  assert_eq "UNDERVOLT" "$(power_parse '' 0x1)"                                       "power_parse: flags without a reading"
+  assert_empty "$(power_parse '' '')"                                                 "power_parse: nothing -> empty"
+  assert_eq "5.22V" "$(power_parse 'EXT5V_V volt(24)=5.22734000V' 'junk')"           "power_parse: non-numeric flags ignored"
+}
+
+test_reports_housekeeping() {
+  local d; d="$(mktemp -d)"
+  mkdir -p "$d/siteA/20260101" "$d/siteA/20260301" "$d/siteB/20251231" "$d/siteB/notes" "$d/default/20260615"
+  local out; out="$(reports_older_than "$d" 20260301 | sed "s|^$d/||" | sort | tr '\n' ' ')"
+  assert_eq "siteA/20260101 siteB/20251231 " "$out" "reports_older_than: day folders before the cutoff, by name; cutoff day itself kept"
+  assert_empty "$(reports_older_than "$d" 20250101)" "reports_older_than: nothing older -> empty"
+  assert_empty "$(reports_older_than "$d/nope" 20260301)" "reports_older_than: missing root -> empty, no error"
+  rm -rf "$d"
+  local lsblk='NAME="mmcblk0p1" RM="0" TYPE="part" FSTYPE="vfat" MOUNTPOINT="/boot/firmware" SIZE="512M"
+NAME="sda" RM="1" TYPE="disk" FSTYPE="" MOUNTPOINT="" SIZE="29G"
+NAME="sda1" RM="1" TYPE="part" FSTYPE="exfat" MOUNTPOINT="" SIZE="29G"
+NAME="sdb1" RM="1" TYPE="part" FSTYPE="vfat" MOUNTPOINT="/media/pi/KEY" SIZE="7.5G"
+NAME="sdc1" RM="1" TYPE="part" FSTYPE="" MOUNTPOINT="" SIZE="1G"'
+  out="$(printf '%s\n' "$lsblk" | usb_parts | tr '\n' ' ')"
+  assert_eq "/dev/sda1||exfat|29G /dev/sdb1|/media/pi/KEY|vfat|7.5G " "$out" "usb_parts: removable partitions with a filesystem, mounted or not"
+}
+
+test_status_fit() {
+  assert_eq 5 "$(status_fit 80 3 "iface wlan0" "ip 10.1.20.176" "gw ● 10.1.20.1" "pwr 5.22V" "wifi none")" "status_fit: everything fits at 80 cols"
+  assert_eq 4 "$(status_fit 63 3 "iface wlan0" "ip 10.1.20.176" "gw ● 10.1.20.1" "pwr 5.22V" "wifi none")" "status_fit: 63-col panel drops the last segment"
+  assert_eq 3 "$(status_fit 63 3 "iface wlan0" "ip 10.1.20.176" "gw ● 10.1.20.1" "site Boardroom" "pwr 5.22V")" "status_fit: site outranks power; both do not fit"
+  assert_eq 3 "$(status_fit 20 3 "iface wlan0" "ip 10.1.20.176" "gw ● 10.1.20.1" "x")" "status_fit: never below the minimum"
+  assert_eq 2 "$(status_fit 80 1 "a" "b")" "status_fit: short list unchanged"
+}
+
 test_plymouth_theme_write() {
   local d; d="$(mktemp -d)"
   : > "$d/splash.png"
@@ -568,6 +626,10 @@ run_test test_logo_art
 run_test test_quick_run_ids
 run_test test_saver_drain
 run_test test_release_helpers
+run_test test_update_check
+run_test test_power_parse
+run_test test_reports_housekeeping
+run_test test_status_fit
 run_test test_plymouth_theme_write
 
 n="$(wc -l <"$fails" | tr -d ' ')"

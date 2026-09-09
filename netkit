@@ -12,7 +12,7 @@
 #        netkit update [URL] | uninstall | version | help
 set -uo pipefail
 
-NETKIT_VERSION="4.8.0"
+NETKIT_VERSION="4.9.0"
 NETKIT_BIN="/usr/local/bin/netkit"
 NETKIT_BIN_DIR="/usr/local/bin"
 NETKIT_CFG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/netkit"
@@ -369,6 +369,7 @@ load_site() {
 # menu's top line); netKit itself is not configurable. IDLE_SECS / BLANK_SECS are
 # the idle stages (screensaver / panel off), 0 = that stage off.
 NETKIT_BRAND=""; NETKIT_IDLE_SECS=90; NETKIT_BLANK_SECS=300
+UPD_AVAIL=""
 settings_file() { echo "$NETKIT_CFG_DIR/netkit.conf"; }
 # secs_valid <n>: whole seconds 0..86400.
 secs_valid() { case "$1" in ''|*[!0-9]*) return 1 ;; esac; [ "$1" -le 86400 ]; }
@@ -447,6 +448,45 @@ logo_text() {
   else printf '%s\n' "$head"; fi
   [ -n "$sub" ] && printf '%s\n' "$sub"
   printf '%s%s%s\n' "$C_DIM" "$ver" "$C_RST"
+}
+# ---------- update check ----------
+# Once a day (in the background, 5 s cap) fetch the published script's version line
+# and remember it; the System row says "update vX available" when it is newer.
+# The published copy is the GitHub main branch unless `netkit update <url>` has
+# stored another URL (a raw gist, a LAN web server).
+NETKIT_UPDATE_URL_DEFAULT="https://raw.githubusercontent.com/grego360/netkit/main/netkit"
+update_url() { cat "$NETKIT_CFG_DIR/update.url" 2>/dev/null || echo "$NETKIT_UPDATE_URL_DEFAULT"; }
+update_stamp() { echo "$NETKIT_CFG_DIR/update.check"; }   # "<version|?> <epoch>"
+# version_gt <a> <b>: 0 when dotted version a is newer than b (missing parts = 0).
+version_gt() {
+  local IFS=. i a b; read -ra a <<<"$1"; read -ra b <<<"$2"
+  for i in 0 1 2 3; do
+    [ "${a[$i]:-0}" -gt "${b[$i]:-0}" ] 2>/dev/null && return 0
+    [ "${a[$i]:-0}" -lt "${b[$i]:-0}" ] 2>/dev/null && return 1
+  done
+  return 1
+}
+# script_version <script text>: the NETKIT_VERSION assignment's value, or "".
+script_version() { printf '%s\n' "$1" | grep -m1 '^NETKIT_VERSION=' | cut -d'"' -f2; }
+# update_stamp_fresh <stamp text> <now>: 0 when the stamp is under a day old.
+update_stamp_fresh() { local v ts; read -r v ts <<<"$1"; [ -n "${ts:-}" ] && [ $(( $2 - ts )) -lt 86400 ] 2>/dev/null; }
+# update_refresh: fetch the published version into the stamp (blocking; callers background it).
+update_refresh() {
+  local now v st; now="$(date +%s)"; st="$(update_stamp)"; mkdir -p "${st%/*}"
+  v="$(script_version "$(curl -fsSL --max-time 5 "$(update_url)" 2>/dev/null | head -c 2048)")"
+  printf '%s %s\n' "${v:-?}" "$now" > "$st.tmp" && mv "$st.tmp" "$st"
+}
+# update_available: prints the newer published version, or nothing. Reads the
+# stamp only; kicks off a background refresh when the stamp is stale or missing.
+update_available() {
+  local st stamp v now; st="$(update_stamp)"; now="$(date +%s)"
+  stamp="$(cat "$st" 2>/dev/null)"
+  if ! update_stamp_fresh "$stamp" "$now"; then
+    ( update_refresh ) >/dev/null 2>&1 &
+  fi
+  read -r v _ <<<"$stamp"
+  [ -n "${v:-}" ] && [ "$v" != "?" ] && version_gt "$v" "$NETKIT_VERSION" && printf '%s' "$v"
+  return 0
 }
 # brand_line: one-line brand · netKit header used above the status line on menus
 # that are too short for the boxed banner.
@@ -641,6 +681,114 @@ report_dir() {
   printf '%s' "$d"
 }
 
+# ---------- report housekeeping (size, prune, USB export) ----------
+REPORT_ROOT="$HOME/netkit-reports"
+# reports_summary: one line per site — size and number of day folders.
+reports_summary() {
+  local s n
+  for s in "$REPORT_ROOT"/*/; do
+    [ -d "$s" ] || continue
+    n="$(find "$s" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+    printf '%-24s %7s  %s day folder(s)\n' "$(basename "$s")" "$(du -sh "$s" 2>/dev/null | cut -f1)" "$n"
+  done
+  [ -d "$REPORT_ROOT" ] && printf '%-24s %7s\n' "total" "$(du -sh "$REPORT_ROOT" 2>/dev/null | cut -f1)"
+}
+# reports_older_than <root> <cutoff YYYYMMDD>: day folders (<root>/<site>/<YYYYMMDD>)
+# dated before the cutoff, by name — folder names are the truth on a unit whose
+# clock may have been wrong when the files were written.
+reports_older_than() {
+  local root="$1" cutoff="$2" d b
+  for d in "$root"/*/*/; do
+    [ -d "$d" ] || continue
+    b="$(basename "$d")"
+    case "$b" in [0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]) [ "$b" \< "$cutoff" ] && printf '%s\n' "${d%/}" ;; esac
+  done
+  return 0
+}
+# usb_parts <lsblk -P text> → "dev|mountpoint|fstype|size" for removable partitions
+# that carry a filesystem (from `lsblk -Pno NAME,RM,TYPE,FSTYPE,MOUNTPOINT,SIZE`).
+usb_parts() {
+  local line name rm_ type fs mp size
+  # lsblk_field <line> <KEY>: the quoted value; the key is anchored on a space so
+  # TYPE= never matches inside FSTYPE=.
+  lsblk_field() { printf ' %s' "$1" | sed -n "s/.* $2=\"\([^\"]*\)\".*/\1/p"; }
+  while IFS= read -r line; do
+    name="$(lsblk_field "$line" NAME)"; rm_="$(lsblk_field "$line" RM)"; type="$(lsblk_field "$line" TYPE)"
+    fs="$(lsblk_field "$line" FSTYPE)"; mp="$(lsblk_field "$line" MOUNTPOINT)"; size="$(lsblk_field "$line" SIZE)"
+    [ "$rm_" = 1 ] && [ "$type" = part ] && [ -n "$fs" ] && printf '/dev/%s|%s|%s|%s\n' "$name" "$mp" "$fs" "$size"
+  done
+  return 0
+}
+# usb_mount <dev> → prints the mountpoint; udisks (no sudo, lands under /media)
+# first, else sudo mount at /mnt/netkit-usb. Sets USB_WE_MOUNTED for the unmount.
+USB_WE_MOUNTED=""
+usb_mount() {
+  local dev="$1" mp=""
+  if have udisksctl && udisksctl mount -b "$dev" >/dev/null 2>&1; then
+    mp="$(lsblk -no MOUNTPOINT "$dev" 2>/dev/null | head -n1)"
+  fi
+  if [ -z "$mp" ]; then
+    mp=/mnt/netkit-usb; sudo mkdir -p "$mp"
+    sudo mount -o "uid=$(id -u),gid=$(id -g)" "$dev" "$mp" 2>/dev/null || sudo mount "$dev" "$mp" || return 1
+  fi
+  USB_WE_MOUNTED="$mp"; printf '%s' "$mp"
+}
+usb_unmount() {
+  [ -n "$USB_WE_MOUNTED" ] || return 0
+  sync
+  if have udisksctl && udisksctl unmount -b "$1" >/dev/null 2>&1; then :; else sudo umount "$USB_WE_MOUNTED" 2>/dev/null; fi
+  USB_WE_MOUNTED=""
+}
+reports_prune() {
+  local days list n size cutoff
+  days="$(ask_num "Delete report folders older than (days):" 90)" || return
+  cutoff="$(date -d "-$days days" +%Y%m%d 2>/dev/null)" || { clear; echo "date -d unavailable"; pause; return; }
+  list="$(reports_older_than "$REPORT_ROOT" "$cutoff")"
+  clear
+  if [ -z "$list" ]; then echo "Nothing older than $days days (before $cutoff)."; pause; return; fi
+  n="$(printf '%s\n' "$list" | wc -l | tr -d ' ')"
+  size="$(printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 du -shc 2>/dev/null | tail -n1 | cut -f1)"
+  printf '%s\n' "$list" | sed "s|^$REPORT_ROOT/|  |"
+  echo; echo "$n folder(s), $size, dated before $cutoff."
+  confirm "Delete them?" || return
+  printf '%s\n' "$list" | tr '\n' '\0' | xargs -0 rm -rf
+  echo "Deleted $n folder(s)."; pause
+}
+reports_export() {
+  [ -d "$REPORT_ROOT" ] || { clear; echo "No reports yet."; pause; return; }
+  local parts rows=() p dev mp fs size choice dest
+  parts="$(lsblk -Pno NAME,RM,TYPE,FSTYPE,MOUNTPOINT,SIZE 2>/dev/null | usb_parts)"
+  if [ -z "$parts" ]; then clear; echo "No USB stick found (a removable partition with a filesystem)."; pause; return; fi
+  while IFS='|' read -r dev mp fs size; do rows+=("$dev|$dev  $size $fs${mp:+  (mounted at $mp)}"); done <<<"$parts"
+  choice="$(menu "Export reports to…" "${rows[@]}" "back|‹ cancel")"
+  case "$choice" in ""|back) return ;; esac
+  mp="$(printf '%s\n' "$parts" | grep "^$choice|" | cut -d'|' -f2)"
+  clear
+  if [ -z "$mp" ]; then mp="$(usb_mount "$choice")" || { echo "Could not mount $choice."; pause; return; }; fi
+  dest="$mp/netkit-reports-$(hostname)"
+  if spin "Copying to $dest…" cp -r "$REPORT_ROOT/." "$dest/"; then
+    echo "Copied $(du -sh "$REPORT_ROOT" | cut -f1) to $dest"
+  else echo "Copy failed (stick full or read-only?)."; fi
+  if [ -n "$USB_WE_MOUNTED" ]; then usb_unmount "$choice"; echo "Unmounted — safe to remove the stick."
+  else sync; echo "Synced — safe to remove the stick."; fi
+  pause
+}
+m_reports_manage() {
+  while true; do
+    local k; k="$(menu "🗂 Manage reports (~/netkit-reports)" \
+      "size|Size per site" \
+      "prune|Delete folders older than…" \
+      "usb|Export everything to a USB stick" \
+      "back|‹ back")"
+    case "$k" in
+      size) show_output "reports" "$(reports_summary)" ;;
+      prune) reports_prune ;;
+      usb) reports_export ;;
+      *) return ;;
+    esac
+  done
+}
+
 # ---------- battery (optional UPS/HAT via sysfs) ----------
 battery_status() {
   local b
@@ -652,6 +800,29 @@ battery_status() {
     fi
   done
   return 1
+}
+
+# ---------- power input (Pi 5 PMIC) ----------
+# The PocketTerm35's UPS board has no fuel gauge on any bus (I2C-1 carries only the
+# touch controller; the keyboard MCU's serial port is a CircuitPython console), so
+# there is no charge %. What the Pi 5 does know is its 5 V input rail (PMIC ADC
+# EXT5V_V) and the firmware's under-voltage flags — a sagging rail / UNDERVOLT is
+# the earliest warning that the UPS is running out or the cable is poor.
+# power_parse <"EXT5V_V volt(24)=5.22734000V"> <throttled hex> → "5.22V [UNDERVOLT|(undervolt seen)]"
+power_parse() {
+  local v f=0 s
+  v="$(printf '%s' "$1" | sed -n 's/.*=\([0-9]*\.[0-9]\{0,2\}\).*/\1/p')"
+  case "$2" in 0x*|[0-9]*) f=$(( $2 )) ;; esac
+  s="${v:+${v}V}"
+  if (( f & 0x1 )); then s="${s:+$s }UNDERVOLT"
+  elif (( f & 0x10000 )); then s="${s:+$s }(undervolt seen)"; fi
+  printf '%s' "$s"
+}
+# power_status → the parsed reading, or fails when vcgencmd is unavailable.
+power_status() {
+  have vcgencmd || return 1
+  local r; r="$(power_parse "$(vcgencmd pmic_read_adc EXT5V_V 2>/dev/null)" "$(vcgencmd get_throttled 2>/dev/null | cut -d= -f2)")"
+  [ -n "$r" ] && printf '%s' "$r"
 }
 
 # Gateway reachability dot, cached 15s so menu redraws don't pay a ~1s ping each.
@@ -669,13 +840,38 @@ gw_dot() {
   esac
 }
 
+# status_fit <cols> <min> <plain seg>…: how many leading segments (joined by three
+# spaces, one leading space) fit in <cols>-1 columns, never fewer than <min>.
+status_fit() {
+  local cols="$1" min="$2"; shift 2
+  local n=$# line i
+  while [ "$n" -gt "$min" ]; do
+    line=" $1"; for (( i = 2; i <= n; i++ )); do line="$line   ${!i}"; done
+    [ "${#line}" -le $(( cols - 1 )) ] && break
+    n=$(( n - 1 ))
+  done
+  echo "$n"
+}
+# status_line: the facts row under the banner. Segments in priority order; the
+# tail is dropped when the terminal is narrow (a wrapped row would steal a menu
+# line — the panel is 63 columns), never the first three (iface, ip, gw).
 status_line() {
-  local dot s
-  dot="$(gw_dot)"
-  s=" ${C_DIM}iface${C_RST} ${IFACE:-?}   ${C_DIM}ip${C_RST} ${SELFIP:-?}   ${C_DIM}gw${C_RST} $dot ${GW:-?}   ${C_DIM}wifi${C_RST} ${WIFACE:-none}"
-  [ -n "$NETKIT_SITE" ] && s="$s   ${C_DIM}site${C_RST} $NETKIT_SITE"
-  local b; if b="$(battery_status)"; then s="$s   ${C_DIM}bat${C_RST} ${b}%"; fi
-  printf '%s\n' "$s"
+  local cols dot b n i out=""
+  cols="$(tput cols 2>/dev/null || echo 80)"; dot="$(gw_dot)"
+  local segs=() plain=()                                   # coloured / plain, same order
+  segs+=("${C_DIM}iface${C_RST} ${IFACE:-?}");  plain+=("iface ${IFACE:-?}")
+  segs+=("${C_DIM}ip${C_RST} ${SELFIP:-?}");    plain+=("ip ${SELFIP:-?}")
+  segs+=("${C_DIM}gw${C_RST} $dot ${GW:-?}");   plain+=("gw ● ${GW:-?}")
+  [ -n "$NETKIT_SITE" ] && { segs+=("${C_DIM}site${C_RST} $NETKIT_SITE"); plain+=("site $NETKIT_SITE"); }
+  if b="$(battery_status)"; then segs+=("${C_DIM}bat${C_RST} ${b}%"); plain+=("bat ${b}%")
+  elif b="$(power_status)"; then
+    case "$b" in *UNDERVOLT*) segs+=("${C_DIM}pwr${C_RST} ${C_ERR}${b}${C_RST}") ;; *) segs+=("${C_DIM}pwr${C_RST} $b") ;; esac
+    plain+=("pwr $b")
+  fi
+  if [ "${WIFACE:-none}" != "$IFACE" ]; then segs+=("${C_DIM}wifi${C_RST} ${WIFACE:-none}"); plain+=("wifi ${WIFACE:-none}"); fi
+  n="$(status_fit "$cols" 3 "${plain[@]}")"
+  for (( i = 0; i < n; i++ )); do out="$out${out:+   }${segs[$i]}"; done
+  printf ' %s\n' "$out"
 }
 
 # ---------- live network facts ----------
@@ -1649,8 +1845,10 @@ m_report() {
       "savelast|Save last viewed output → report" \
       "vnstat|vnstat traffic summary" \
       "rec|Record terminal session (asciinema)" \
+      "manage|Manage reports (size · prune · USB export)" \
       "back|‹ back")"
     case "$k" in
+      manage) m_reports_manage ;;
       snap) report_snmp_prompt; gen_report "$RP_HOST" "$RP_COMM" ;;
       sweep) report_snmp_prompt; gen_sweep "$RP_HOST" "$RP_COMM" ;;
       savelast) save_last_report ;;
@@ -1692,9 +1890,35 @@ m_brand() {
   done
 }
 
+# m_osupdate: apt from the menu — check, install, clean, reboot.
+m_osupdate() {
+  while true; do
+    local k; k="$(menu "📦 OS updates (apt)$( [ -f /var/run/reboot-required ] && printf ' · reboot required')" \
+      "check|Check for updates" \
+      "upgrade|Install all updates (apt full-upgrade)" \
+      "clean|Remove unused packages (apt autoremove)" \
+      "reboot|Reboot the unit" \
+      "back|‹ back")"
+    case "$k" in
+      check) clear; sudo -n true 2>/dev/null || sudo -v 2>/dev/null
+             spin "apt update…" sudo apt-get update -qq || warn "apt update had issues"
+             local out; out="$(apt list --upgradable 2>/dev/null | tail -n +2)"
+             show_output "apt list --upgradable" "${out:-Everything is up to date.}" ;;
+      upgrade) confirm "Install all pending updates now?" || continue
+               run sudo env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y ;;
+      clean) run sudo apt-get autoremove -y ;;
+      reboot) confirm "Reboot the unit now?" && sudo systemctl reboot ;;
+      *) return ;;
+    esac
+  done
+}
 m_system() {
   while true; do
+    local upd; upd="$(update_available)"
     local k; k="$(menu "⚙️ System / Network info" \
+      "tools|Prebuilt tools · doctor (versions vs GitHub)" \
+      "os|OS updates (apt)$( [ -f /var/run/reboot-required ] && printf ' · reboot required')" \
+      "update|Update netkit${upd:+ · v$upd available}" \
       "if|Interface overview" \
       "eth|Wired link speed/duplex (ethtool)" \
       "subnet|Subnet calculator (ipcalc)" \
@@ -1705,6 +1929,12 @@ m_system() {
       "idle|Idle screen & panel off (${NETKIT_IDLE_SECS}s / ${NETKIT_BLANK_SECS}s)" \
       "back|‹ back")"
     case "$k" in
+      tools) local out rc; clear; echo "Checking the latest releases on GitHub…"
+             out="$(do_doctor 2>&1)"; rc=$?
+             show_output "netkit doctor" "$out"
+             if [ "$rc" -ne 0 ] && confirm "Reinstall the BROKEN / outdated binaries now?"; then clear; do_doctor fix; pause; fi ;;
+      os) m_osupdate ;;
+      update) clear; do_update; pause ;;
       brand) m_brand ;;
       idle) m_idle ;;
       if) page ip -c -br addr ;;
@@ -2219,6 +2449,9 @@ hw_battery() {
     ok "battery $(hw_read "$p/capacity")% $(hw_read "$p/status")"; return
   done
   warn "battery not exposed (UPS board has no fuel-gauge driver; watch the board LEDs)"
+  local pw; if pw="$(power_status)"; then
+    case "$pw" in *UNDERVOLT*) bad "5V input $pw — UPS low or poor cable" ;; *) ok "5V input $pw" ;; esac
+  fi
 }
 hw_thermal() {
   local t; t="$(hw_read "$NETKIT_SYS/class/thermal/thermal_zone0/temp")"
@@ -2286,7 +2519,7 @@ do_selftest() {
 
 do_doctor() { # [fix]
   local fix="${1:-}"
-  echo "netkit doctor — prebuilt binaries: installed vs the latest GitHub release"
+  echo "netkit doctor — prebuilt binaries vs the latest GitHub release"
   echo
   local i json url tag bin have_v want_v todo=()
   for i in "${!PREBUILT_REPOS[@]}"; do
@@ -2330,22 +2563,25 @@ do_doctor() { # [fix]
 do_update() {
   local url="${1:-}"
   mkdir -p "$NETKIT_CFG_DIR"
-  if [ -n "$url" ]; then printf '%s\n' "$url" > "$NETKIT_CFG_DIR/update.url"
-  elif [ -f "$NETKIT_CFG_DIR/update.url" ]; then url="$(cat "$NETKIT_CFG_DIR/update.url")"; fi
-  if [ -z "$url" ]; then
-    echo "No update URL set. Pass the Raw gist URL once and it'll be remembered:"
-    echo "  netkit update 'https://gist.githubusercontent.com/<user>/<id>/raw/netkit'"
-    exit 1
-  fi
+  if [ -n "$url" ]; then printf '%s\n' "$url" > "$NETKIT_CFG_DIR/update.url"; else url="$(update_url)"; fi
+  echo "Fetching $url"
   local tmp; tmp="$(mktemp)"
-  if ! curl -fsSL "$url" -o "$tmp"; then echo "Download failed: $url"; rm -f "$tmp"; exit 1; fi
+  if ! curl -fsSL "$url" -o "$tmp"; then echo "Download failed: $url"; rm -f "$tmp"; return 1; fi
   if [ "$(head -1 "$tmp")" != "#!/usr/bin/env bash" ]; then
     echo "Refusing to install: fetched file isn't a bash script (got HTML?)."
-    echo "Make sure you copied the *Raw* gist URL, not the gist web page."
-    rm -f "$tmp"; exit 1
+    echo "Make sure the URL is the *Raw* file, not a web page."
+    rm -f "$tmp"; return 1
+  fi
+  local nv; nv="$(script_version "$(head -c 2048 "$tmp")")"
+  if [ "$nv" = "$NETKIT_VERSION" ]; then echo "Already on v$NETKIT_VERSION (published copy is the same)."; rm -f "$tmp"; return 0; fi
+  if [ -n "$nv" ] && ! version_gt "$nv" "$NETKIT_VERSION" && [ "${NETKIT_UPDATE_FORCE:-0}" != 1 ]; then
+    echo "Published copy is v$nv, older than the installed v$NETKIT_VERSION — not downgrading."
+    echo "(NETKIT_UPDATE_FORCE=1 netkit update  to roll back on purpose.)"
+    rm -f "$tmp"; return 0
   fi
   if sudo install -m 0755 "$tmp" "$NETKIT_BIN"; then
-    echo "Updated $NETKIT_BIN -> $(grep -m1 'NETKIT_VERSION=' "$NETKIT_BIN" | cut -d'"' -f2)"
+    echo "Updated $NETKIT_BIN: v$NETKIT_VERSION -> v${nv:-?}"
+    rm -f "$(update_stamp)"   # re-check on the next launch
   else
     echo "Install failed (need sudo rights to $NETKIT_BIN)."
   fi
@@ -2455,7 +2691,7 @@ do_screensaver() {
     cols="$(tput cols 2>/dev/null || echo 80)"; rows="$(tput lines 2>/dev/null || echo 24)"
     raw="$(logo_text "$cols"; echo
            printf '%s%s%s%s\n' "$C_DIM" "$(date '+%a %d %b  %H:%M')" "${site:+   $site}" "$C_RST"
-           printf '%s%s%s%s\n' "$C_DIM" "${SELFIP:-no address}" "${IFACE:+ on $IFACE}" "$C_RST")"
+           printf '%s%s%s%s%s\n' "$C_DIM" "${SELFIP:-no address}" "${IFACE:+ on $IFACE}" "$(pw="$(power_status)" && printf '   %s' "$pw")" "$C_RST")"
     w="$(printf '%s\n' "$raw" | sed $'s/\e\\[[0-9;]*m//g' | awk '{ if (length > m) m = length } END { print m+0 }')"
     art="$(printf '%s\n' "$raw" | center_lines "$w")"      # one left-aligned w-wide block
     n="$(printf '%s\n' "$art" | wc -l | tr -d ' ')"
@@ -2604,7 +2840,7 @@ netkit v${NETKIT_VERSION} — Pi 5 network toolkit
   netkit doctor [fix]  prebuilt binaries vs latest GitHub release; fix = reinstall stale/broken
   netkit site [name]   site profiles (prefill prompts per location)
   netkit autostart on|off   boot the unit straight into netkit
-  netkit update [URL]  re-pull this script from a Raw gist URL
+  netkit update [URL]  install the published script (GitHub main, or a Raw URL given once)
   netkit uninstall     remove the netkit binary
   netkit version       print version
 EOF
@@ -2719,7 +2955,7 @@ case "${1:-}" in
   doctor|--doctor) do_doctor "${2:-}"; exit $? ;;
   site|--site) do_site "${2:-}"; exit 0 ;;
   autostart|--autostart) do_autostart "${2:-}"; exit 0 ;;
-  update|--update) do_update "${2:-}"; exit 0 ;;
+  update|--update) do_update "${2:-}"; exit $? ;;
   uninstall|--uninstall) do_uninstall; exit 0 ;;
   version|--version|-v) echo "netkit v${NETKIT_VERSION}"; exit 0 ;;
   help|--help|-h) usage; exit 0 ;;
@@ -2738,6 +2974,7 @@ first_run_check
 tmux_tune
 splash_screen
 while true; do
+  UPD_AVAIL="$(update_available)"
   k="$(menu "Pick a category" \
     "-|── everyday ──────────────" \
     "quick|Quick checks" \
@@ -2756,7 +2993,7 @@ while true; do
     "ot|Building / OT" \
     "-|── system ────────────────" \
     "report|Reporting" \
-    "system|System / Network info" \
+    "system|System / Network info${UPD_AVAIL:+ · update v$UPD_AVAIL}" \
     "site|Site profile" \
     "help|Help / keys" \
     "quit|Quit")"
