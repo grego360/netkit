@@ -2360,7 +2360,7 @@ do_idle_daemon() {
   [ -n "${WAYLAND_DISPLAY:-}" ] || { echo "idle-daemon: no Wayland session (kiosk only)."; return 1; }
   have swayidle || { echo "idle-daemon: swayidle not installed (netkit setup)."; return 1; }
   local old; old="$(cat "$IDLE_PIDFILE" 2>/dev/null)"
-  [ -n "$old" ] && kill "$old" 2>/dev/null
+  [ -n "$old" ] && [ "$(cat "/proc/$old/comm" 2>/dev/null)" = swayidle ] && kill "$old" 2>/dev/null
   local args=(); while IFS= read -r _a; do args+=("$_a"); done < <(idle_daemon_args)
   [ "${#args[@]}" -gt 0 ] || { rm -f "$IDLE_PIDFILE"; return 0; }
   echo $$ > "$IDLE_PIDFILE"
@@ -2401,11 +2401,20 @@ saver_offsets() {
   [ "$ys" -gt 0 ] && y=$(( RANDOM % (ys + 1) ))
   echo "$x $y"
 }
+# saver_drain [first-wait] [next-wait]: swallow whatever else the wake input sent. A key is
+# often several bytes (arrows, function keys) and a tap under tmux mouse mode is
+# a whole SGR sequence; only the first byte ends the saver's read, so the rest
+# would land in the menu and move its cursor. On a SIGTERM wake (swayidle saw
+# the input before the terminal did) wait a little longer for the bytes to arrive.
+saver_drain() {
+  local t="${1:-0.05}" n="${2:-0.05}"
+  while read -r -s -n 1 -t "$t"; do t="$n"; done
+}
 # do_screensaver: the idle screen — wordmark, clock, site and address, moved every
 # 30 s. Exits on any key (consumed here, not by the menu) or on SIGTERM (idle-wake).
 do_screensaver() {
   echo $$ > "$SAVER_PIDFILE"
-  trap 'tput cnorm 2>/dev/null; clear; rm -f "$SAVER_PIDFILE"; exit 0' TERM INT HUP
+  trap 'saver_drain 0.3; tput cnorm 2>/dev/null; clear; rm -f "$SAVER_PIDFILE"; exit 0' TERM INT HUP
   tput civis 2>/dev/null
   local cols rows raw art n w x y site pad
   site="$(cat "$NETKIT_CFG_DIR/active-site" 2>/dev/null)"
@@ -2422,7 +2431,7 @@ do_screensaver() {
     clear
     for (( i = 0; i < y; i++ )); do echo; done
     printf '%s\n' "$art" | sed "s/^/$pad/"
-    read -r -s -n 1 -t 30 && break
+    if read -r -s -n 1 -t 30; then saver_drain; break; fi
   done
   tput cnorm 2>/dev/null; clear; rm -f "$SAVER_PIDFILE"
 }
@@ -2445,7 +2454,7 @@ m_idle() {
         local key label v
         if [ "$k" = idle ]; then key=IDLE_SECS; label="Screensaver after (s):"; v="$NETKIT_IDLE_SECS"
         else key=BLANK_SECS; label="Panel off after (s):"; v="$NETKIT_BLANK_SECS"; fi
-        v="$(ask "$label" "$v")"
+        v="$(ask "$label" "$v")"; [ -n "$v" ] || continue   # Esc / blank = cancel
         clear
         if secs_valid "$v"; then set_setting "$key" "$v"; idle_daemon_restart; echo "$key = $v"
         else echo "Whole seconds 0..86400 please."; fi

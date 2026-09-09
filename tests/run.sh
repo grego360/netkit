@@ -362,6 +362,51 @@ test_logo_text() {
   NETKIT_BRAND=""; C_HDR=''; C_RST=''
 }
 
+test_logo_art() {
+  # figlet stub: two padded lines per word, so the joiner has something to line up
+  figlet() { local f; while [ $# -gt 0 ]; do case "$1" in -f) f="$2"; shift ;; --) shift; break ;; esac; shift; done
+             printf '%-8s\n' "$*" "$*-"; }
+  C_HDR='<G>'; C_RST='</G>'
+  local out; out="$(logo_art standard 40 "Modal " "AV")"
+  assert_eq 2 "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" "logo_art: joined block keeps figlet's line count"
+  assert_eq "Modal   <G>AV      </G>" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_art: head and accent tail joined on one line"
+  assert_eq "Modal - <G>AV-     </G>" "$(printf '%s\n' "$out" | sed -n 2p)" "logo_art: second line joined the same way"
+  out="$(logo_art standard 40 "" "netKit")"
+  assert_eq "<G>netKit  </G>" "$(printf '%s\n' "$out" | sed -n 1p)" "logo_art: empty head -> tail only, in colour"
+  out="$(logo_art standard 40 "Solo" "")"
+  assert_eq "Solo    " "$(printf '%s\n' "$out" | sed -n 1p)" "logo_art: empty tail -> plain head"
+  logo_art standard 10 "Modal " "AV" >/dev/null; assert_rc 1 "$?" "logo_art: fails when the widest line exceeds cols"
+  C_HDR=$'\e[32m'; C_RST=$'\e[0m'   # real escapes: the width check must strip them
+  logo_art standard 16 "Modal " "AV" >/dev/null; assert_rc 0 "$?" "logo_art: fits exactly at the measured width (colour codes not counted)"
+  logo_art standard 15 "Modal " "AV" >/dev/null; assert_rc 1 "$?" "logo_art: one column short does not fit"
+  figlet() { return 1; }
+  logo_art standard 40 "x" "" >/dev/null; assert_rc 1 "$?" "logo_art: fails when figlet produces nothing"
+  C_HDR=''; C_RST=''
+}
+
+test_quick_run_ids() {
+  # every id offered by m_quick must be handled by quick_run (its default branch is a no-op)
+  local ids id handled
+  ids="$(sed -n '/^m_quick()/,/^}/p' ./netkit | grep -oE '"[a-z]+\|' | tr -d '"|' | grep -v '^back$')"
+  handled=" $(sed -n '/^quick_run()/,/^}/p' ./netkit | grep -oE '^ *[a-z]+\)' | tr -d ' )' | tr '\n' ' ') "
+  assert_eq "gw arp nsn lldp btscan selftest hw sweep" "$(echo $ids)" "m_quick: expected quick-action ids"
+  for id in $ids; do
+    case "$handled" in *" $id "*) assert_rc 0 0 "quick_run: handles '$id'" ;; *) assert_rc 0 1 "quick_run: handles '$id'" ;; esac
+  done
+}
+
+test_saver_drain() {
+  # Integer timeout here: macOS bash 3.2 rejects fractional -t (the Pi's bash 5 is
+  # fine with the production 0.05 / 0.3). On a pipe EOF returns at once anyway.
+  local out
+  out="$(printf '\033[A' | { saver_drain 1 1; echo "left:$(cat)"; })"
+  assert_eq "left:" "$out" "saver_drain: swallows a whole escape sequence"
+  out="$(printf '' | { saver_drain 1 1; echo "left:$(cat)"; })"
+  assert_eq "left:" "$out" "saver_drain: returns promptly on empty input"
+  out="$(printf 'a' | { read -r -s -n 1 _; saver_drain 1 1; echo "left:$(cat)"; })"
+  assert_eq "left:" "$out" "saver_drain: nothing left after a single-byte key"
+}
+
 test_plymouth_theme_write() {
   local d; d="$(mktemp -d)"
   : > "$d/splash.png"
@@ -493,6 +538,9 @@ run_test test_idle_can_lock
 run_test test_saver_offsets
 run_test test_idle_daemon_args
 run_test test_tmux_tune_idle
+run_test test_logo_art
+run_test test_quick_run_ids
+run_test test_saver_drain
 run_test test_plymouth_theme_write
 
 n="$(wc -l <"$fails" | tr -d ' ')"
