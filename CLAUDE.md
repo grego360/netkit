@@ -13,11 +13,11 @@ those conventions, agents, or skills apply here.
 
 ## What this is
 
-A single ~2150-line bash script (`netkit`) that is a categorised network
+A single ~2750-line bash script (`netkit`) that is a categorised network
 testing/inspection/reporting dashboard for a Raspberry Pi 5 handheld (aarch64,
 Raspberry Pi OS, Debian 13 Trixie). No build step, no package, no in-script dependencies.
-"Installing" = copying the one file to `/usr/local/bin/netkit`. `older_versions/`
-holds prior iterations for reference only — don't edit them.
+"Installing" = copying the one file to `/usr/local/bin/netkit`. Prior iterations live
+in git history only (`git log -- netkit`).
 
 ## Mandatory verification (every change)
 
@@ -39,7 +39,7 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
 ## Hard constraints
 
 - `set -uo pipefail` (no `-e`). **Every new global must be initialised** so `set -u`
-  is satisfied (see the site-variable block around line 93).
+  is satisfied (see the `SITE_*` block under `# ---------- site profiles`).
 - Runs as the **normal user**; call `sudo` only for the few actions needing it (raw
   sockets, systemd, setcap). Never require running the whole script as root.
 - **apt-first.** Use Debian aarch64 packages where they exist. Third-party repos /
@@ -49,6 +49,10 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
 - Prefer a single self-contained deliverable per change.
 
 ## Architecture of the one file (top → bottom)
+
+Sections are marked by `# ---------- name ----------` comment lines; find one with
+`grep -n '^# ---------- ' netkit` (line numbers move with every change, so this file
+names sections, not lines).
 
 1. **Header + globals** — shebang, `set -uo pipefail`, `NETKIT_VERSION`, paths
    (`NETKIT_CFG_DIR`, `site_dir`).
@@ -69,30 +73,36 @@ the equivalents are `netkit selftest` (tools + live network) and `netkit doctor`
    gping, btmon, tcpdump etc. own the terminal and corrupt if captured; call those via
    `run` only. A single `trap … INT` near the main loop makes Ctrl-C abort the
    current action and return to the menu rather than kill netkit.
-3. **Site profiles** (~line 219–330) — per-location defaults in
+3. **Site profiles** (`# ---------- site profiles`; unit settings — brand, idle timers —
+   follow under `# ---------- unit settings`) — per-location defaults in
    `~/.config/netkit/sites/<name>.conf`. `load_site` is a **whitelist `key=value`
    parser** — the `.conf` is *never* sourced/executed (security boundary; don't replace
    it with `source`). Fields populate `SITE_*` globals consumed by menu actions.
    Whitelisted keys include `SNMP_TARGET` (switch IP for the report SNMP/PoE section).
-4. **Live network facts** (~line 381–393) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
+4. **Live network facts** (`# ---------- live network facts`) — `IFACE`, `GW`, `CIDR`, `SELFIP`, `WIFACE`,
    `WIRED` detected at launch from `ip`/sysfs. Re-detected every run; menus read these.
-5. **Category menus** `m_*` (~line 736–1599) — one function per dashboard category
-   (`m_discovery`, `m_link`, `m_wifi`, `m_packet`, `m_dns`, `m_lldp`, `m_snmp`,
-   `m_devctl`, `m_avoip`, `m_iot`, `m_rf`, `m_ot`, `m_report`, `m_system`, `m_site`).
-   Each builds a `menu` and dispatches to actions wrapped in `run`/`page`.
+5. **Category menus** `m_*` (`# ---------- categories`) — one function per dashboard
+   category (`m_discovery`, `m_link`, `m_wifi`, `m_packet`, `m_dns`, `m_lldp`, `m_snmp`,
+   `m_devctl`, `m_avoip`, `m_iot`, `m_rf`, `m_ot`, `m_report`, `m_brand`, `m_system`,
+   `m_site`). Each builds a `menu` and dispatches to actions wrapped in `run`/`page`.
+   Three menus live outside that block, next to the code they front: `m_idle` (under
+   `# ---------- idle screen & panel blanking`, with the `idle-*`/`screensaver`/`kiosk`
+   subcommand handlers), `m_quick` (`# ---------- quick actions`, a dispatch table) and
+   `m_site` (after the site-profile helpers).
 6. **Report generators** — `gen_report` (snapshot), `gen_sweep` (branded commissioning
    sweep), `run_dash` (tmux tiled view). Output goes under `report_dir`:
    `~/netkit-reports/<site|default>/<date>/`.
-7. **Prebuilt-binary registry** (~line 1761) — four parallel arrays
+7. **Prebuilt-binary registry** (`# ---------- prebuilt-binary registry`) — four parallel arrays
    `PREBUILT_REPOS / PREBUILT_RX / PREBUILT_BIN / PREBUILT_NAME` for the GitHub-release
    tools (`librespeed-cli`, `gping`, `bandwhich`, `xh`, `bacnet`/rusty-bacnet). Shared by `install_release_bin`
    (used by `do_setup`) and `do_doctor`. **When a project renames its release asset, the
    fix is a one-line regex edit in `PREBUILT_RX`** — netkit falls back to the base tool
    meanwhile. `netkit doctor` exists to catch this drift proactively.
 8. **Subcommands** — `do_setup`, `do_selftest`, `do_doctor`, `do_update`,
-   `do_uninstall`, `do_autostart`, `usage`.
-9. **Main dispatch** (~line 2086) — `load_site`, then a `case` on `$1` for subcommands;
-   no arg → the interactive category loop.
+   `do_uninstall`, `do_autostart`, `do_kiosk`/`do_idle_*`/`do_screensaver`, `usage`.
+9. **Main dispatch** (`# ---------- main`) — the `NETKIT_LIB=1` source guard (tests load
+   functions without running), `load_site`, `load_settings`, then a `case` on `$1` for
+   subcommands; no arg → the interactive category loop.
 
 ### Adding a feature
 Add the action inside the relevant `m_*` menu (a new `"key|Label"` line + a `case`

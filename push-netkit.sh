@@ -4,13 +4,13 @@
 # /usr/local/bin/netkit via sudo and prints the running version.
 #
 # Usage:  ./push-netkit.sh                 # local Pi (default)
-#         ./push-netkit.sh local           # local Pi, explicit
+#         ./push-netkit.sh local           # local Pi, explicit (SSH alias "terminosa")
 #         ./push-netkit.sh remote          # remote Pi (pocket-term-rpi)
 #         ./push-netkit.sh user@host       # literal target override
 #         NETKIT_PI=user@host ./push-netkit.sh   # override the default (no-arg) target
 set -euo pipefail
 
-PI_LOCAL="terminosa@10.1.20.176"      # on-LAN address
+PI_LOCAL="terminosa"                  # ~/.ssh/config alias (HostName, User, IdentityFile live there)
 PI_REMOTE="terminosa@pocket-term-rpi" # hostname-resolved address (VPN / SSH config / mDNS)
 
 # Resolve the target: a bare 'local'/'remote' picks a known Pi; anything else is

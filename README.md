@@ -10,7 +10,7 @@ copying that one file to `/usr/local/bin/netkit` and marking it executable.
 The tools it drives (nmap, iperf3, snmpwalk, …) are installed separately by
 `netkit setup`.
 
-**Current version: 4.3.0**
+**Current version: 4.8.0**
 
 ---
 
@@ -154,7 +154,7 @@ netkit doctor       # confirm the 5 GitHub binary matchers still resolve
 [`push-netkit.sh`](./push-netkit.sh):
 
 ```bash
-./push-netkit.sh                 # deploy to the local Pi (terminosa@10.1.20.176)
+./push-netkit.sh                 # deploy to the local Pi (SSH alias "terminosa")
 ./push-netkit.sh remote          # deploy to the remote Pi (terminosa@pocket-term-rpi)
 ./push-netkit.sh local           # local Pi, explicit
 ./push-netkit.sh user@host       # or a literal target override
